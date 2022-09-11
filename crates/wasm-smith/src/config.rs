@@ -449,6 +449,23 @@ pub trait Config: 'static + std::fmt::Debug {
     fn threads_enabled(&self) -> bool {
         false
     }
+
+    /// Determines whether float value types can be present
+    /// in the code's instruction set or other parts of the
+    /// module.
+    ///
+    /// Defaults to `false`.
+    fn float_enabled(&self) -> bool {
+        false
+    }
+
+    /// Determines whether memory grow instruction is enabled
+    /// in the generating module.
+    ///
+    /// Defaults to `false`.
+    fn memory_grow_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// The default configuration.
@@ -519,10 +536,12 @@ pub struct SwarmConfig {
     pub saturating_float_to_int_enabled: bool,
     pub sign_extension_enabled: bool,
     pub simd_enabled: bool,
+    pub float_enabled: bool,
     pub threads_enabled: bool,
     pub allowed_instructions: InstructionKinds,
     pub max_table_elements: u32,
     pub table_max_size_required: bool,
+    pub memory_grow_enabled: bool,
 }
 
 impl<'a> Arbitrary<'a> for SwarmConfig {
@@ -567,6 +586,8 @@ impl<'a> Arbitrary<'a> for SwarmConfig {
             },
             table_max_size_required: u.arbitrary()?,
             max_table_elements: u.int_in_range(0..=1_000_000)?,
+            float_enabled: u.arbitrary()?,
+            memory_grow_enabled: u.arbitrary()?,
 
             // These fields, unlike the ones above, are less useful to set.
             // They either make weird inputs or are for features not widely
@@ -794,5 +815,13 @@ impl Config for SwarmConfig {
 
     fn table_max_size_required(&self) -> bool {
         self.table_max_size_required
+    }
+
+    fn float_enabled(&self) -> bool {
+        self.float_enabled
+    }
+
+    fn memory_grow_enabled(&self) -> bool {
+        self.memory_grow_enabled
     }
 }
