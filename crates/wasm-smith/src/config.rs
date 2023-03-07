@@ -466,6 +466,14 @@ pub trait Config: 'static + std::fmt::Debug {
     fn memory_grow_enabled(&self) -> bool {
         false
     }
+
+    /// Determines whether `call_indirect` instruction is enabled
+    /// in the generating module.
+    ///
+    /// Defaults to `true`.
+    fn call_indirect_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// The default configuration.
@@ -542,6 +550,7 @@ pub struct SwarmConfig {
     pub max_table_elements: u32,
     pub table_max_size_required: bool,
     pub memory_grow_enabled: bool,
+    pub call_indirect_enabled: bool,
 }
 
 impl<'a> Arbitrary<'a> for SwarmConfig {
@@ -588,6 +597,7 @@ impl<'a> Arbitrary<'a> for SwarmConfig {
             max_table_elements: u.int_in_range(0..=1_000_000)?,
             float_enabled: u.arbitrary()?,
             memory_grow_enabled: u.arbitrary()?,
+            call_indirect_enabled: u.arbitrary()?,
 
             // These fields, unlike the ones above, are less useful to set.
             // They either make weird inputs or are for features not widely
@@ -823,5 +833,9 @@ impl Config for SwarmConfig {
 
     fn memory_grow_enabled(&self) -> bool {
         self.memory_grow_enabled
+    }
+
+    fn call_indirect_enabled(&self) -> bool {
+        self.call_indirect_enabled
     }
 }
