@@ -1439,9 +1439,13 @@ fn call(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Res
 
 #[inline]
 fn call_indirect_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
-    if builder.allocs.funcref_tables.is_empty() || !builder.type_on_stack(ValType::I32) {
+    if !module.config.call_indirect_enabled()
+        || builder.allocs.funcref_tables.is_empty()
+        || !builder.type_on_stack(ValType::I32)
+    {
         return false;
     }
+
     let ty = builder.allocs.operands.pop().unwrap();
     let is_valid = module
         .func_types()
