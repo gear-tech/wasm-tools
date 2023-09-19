@@ -474,6 +474,14 @@ pub trait Config: 'static + std::fmt::Debug {
     fn call_indirect_enabled(&self) -> bool {
         true
     }
+
+    /// Determines whether `unreachable` instruction is enabled
+    /// in the generating module.
+    ///
+    /// Defaults to `true`.
+    fn unreachable_instruction_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// The default configuration.
@@ -551,6 +559,7 @@ pub struct SwarmConfig {
     pub table_max_size_required: bool,
     pub memory_grow_enabled: bool,
     pub call_indirect_enabled: bool,
+    pub unreachable_instruction_enabled: bool,
 }
 
 impl<'a> Arbitrary<'a> for SwarmConfig {
@@ -598,6 +607,7 @@ impl<'a> Arbitrary<'a> for SwarmConfig {
             float_enabled: u.arbitrary()?,
             memory_grow_enabled: u.arbitrary()?,
             call_indirect_enabled: u.arbitrary()?,
+            unreachable_instruction_enabled: u.arbitrary()?,
 
             // These fields, unlike the ones above, are less useful to set.
             // They either make weird inputs or are for features not widely
@@ -837,5 +847,9 @@ impl Config for SwarmConfig {
 
     fn call_indirect_enabled(&self) -> bool {
         self.call_indirect_enabled
+    }
+
+    fn unreachable_instruction_enabled(&self) -> bool {
+        self.unreachable_instruction_enabled
     }
 }
