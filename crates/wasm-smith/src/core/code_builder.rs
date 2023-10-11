@@ -87,7 +87,7 @@ macro_rules! instructions {
 //    less than 1000.
 instructions! {
     // Control instructions.
-    (Some(unreachable_valid), unreachable, Control, 990),
+    (None, unreachable, Control, 990),
     (None, nop, Control, 800),
     (None, block, Control),
     (None, r#loop, Control),
@@ -1097,11 +1097,6 @@ fn arbitrary_val(ty: ValType, u: &mut Unstructured<'_>) -> Instruction {
         ValType::ExternRef => Instruction::RefNull(ValType::ExternRef),
         ValType::FuncRef => Instruction::RefNull(ValType::FuncRef),
     }
-}
-
-#[inline]
-fn unreachable_valid(module: &Module, _: &mut CodeBuilder) -> bool {
-    module.config.unreachable_instruction_enabled()
 }
 
 fn unreachable(_: &mut Unstructured, _: &Module, _: &mut CodeBuilder) -> Result<Instruction> {
