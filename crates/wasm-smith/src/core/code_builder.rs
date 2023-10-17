@@ -807,9 +807,6 @@ impl CodeBuilderAllocations {
             if u.ratio(1, 100).unwrap_or(false) {
                 continue;
             }
-
-            let name = unique_string(1_000, &mut module.export_names, u)?;
-            module.add_arbitrary_export(name, ExportKind::Global, global_idx)?;
         }
         Ok(())
     }
