@@ -1,7 +1,7 @@
 //! This mutator modifies the constant initializer expressions between various valid forms in
 //! entities which require constant initializers.
 
-use crate::mutators::translate::{self, ConstExprKind, Item, Translator};
+use crate::mutators::translate::{self, ConstExprKind, DefaultTranslator, Item, Translator};
 use crate::{Error, Mutator, Result};
 use rand::Rng;
 use wasm_encoder::{ElementSection, GlobalSection};
@@ -91,7 +91,7 @@ impl<'cfg, 'wasm> Translator for InitTranslator<'cfg, 'wasm> {
             // as other values may not necessarily be valid (e.g. maximum table size is limited)
             let is_element_offset = matches!(kind, ConstExprKind::ElementOffset);
             let should_zero = is_element_offset || self.config.rng().gen::<u8>() & 0b11 == 0;
-            match ty {
+            match *ty {
                 T::I32 if should_zero => CE::i32_const(0),
                 T::I64 if should_zero => CE::i64_const(0),
                 T::V128 if should_zero => CE::v128_const(0),
@@ -124,8 +124,9 @@ impl<'cfg, 'wasm> Translator for InitTranslator<'cfg, 'wasm> {
                 } else {
                     f64::from_bits(self.config.rng().gen())
                 }),
-                T::FuncRef => CE::ref_null(wasm_encoder::ValType::FuncRef),
-                T::ExternRef => CE::ref_null(wasm_encoder::ValType::ExternRef),
+                T::FUNCREF => CE::ref_null(wasm_encoder::HeapType::Func),
+                T::EXTERNREF => CE::ref_null(wasm_encoder::HeapType::Extern),
+                T::Ref(_) => unimplemented!(),
             }
         } else {
             // FIXME: implement non-reducing mutations for constant expressions.
@@ -139,7 +140,7 @@ impl<'cfg, 'wasm> Translator for InitTranslator<'cfg, 'wasm> {
 
 impl Mutator for ConstExpressionMutator {
     fn mutate<'a>(
-        self,
+        &self,
         config: &'a mut crate::WasmMutate,
     ) -> crate::Result<Box<dyn Iterator<Item = crate::Result<wasm_encoder::Module>> + 'a>> {
         let translator_kind = match self {
@@ -154,24 +155,20 @@ impl Mutator for ConstExpressionMutator {
                 let mutate_idx = config.rng().gen_range(0..num_total);
                 let section = config.info().globals.ok_or(skip_err)?;
                 let mut new_section = GlobalSection::new();
-                let mut reader =
-                    GlobalSectionReader::new(config.info().raw_sections[section].data, 0)?;
+                let reader = GlobalSectionReader::new(config.info().raw_sections[section].data, 0)?;
                 let mut translator = InitTranslator {
                     config,
                     skip_inits: 0,
                     kind: translator_kind,
                 };
-                for idx in 0..reader.get_count() {
+                for (idx, global) in reader.into_iter().enumerate() {
                     translator.config.consume_fuel(1)?;
-                    let start = reader.original_position();
-                    let global = reader.read()?;
-                    let end = reader.original_position();
-                    if idx == mutate_idx {
+                    let global = global?;
+                    if idx as u32 == mutate_idx {
                         log::trace!("Modifying global at index {}...", idx);
                         translator.translate_global(global, &mut new_section)?;
                     } else {
-                        let old_section = &translator.config.info().raw_sections[section];
-                        new_section.raw(&old_section.data[start..end]);
+                        DefaultTranslator.translate_global(global, &mut new_section)?;
                     }
                 }
                 let new_module = config.info().replace_section(section, &new_section);
@@ -182,23 +179,24 @@ impl Mutator for ConstExpressionMutator {
                 let mutate_idx = config.rng().gen_range(0..num_total);
                 let section = config.info().elements.ok_or(skip_err)?;
                 let mut new_section = ElementSection::new();
-                let mut reader =
+                let reader =
                     ElementSectionReader::new(config.info().raw_sections[section].data, 0)?;
                 let mut translator = InitTranslator {
                     config,
                     skip_inits: 0,
                     kind: translator_kind,
                 };
-                for idx in 0..reader.get_count() {
+                for (idx, element) in reader.into_iter().enumerate() {
                     translator.config.consume_fuel(1)?;
-                    let start = reader.original_position();
-                    let element = reader.read()?;
-                    let end = reader.original_position();
-                    if idx == mutate_idx {
+                    let element = element?;
+                    if idx as u32 == mutate_idx {
                         if let Self::ElementFunc = self {
                             // Pick a specific element item to mutate. We do this through an option
                             // to skip a specific number of activations of the Translator methods.
-                            let item_count = element.items.get_items_reader()?.get_count();
+                            let item_count = match &element.items {
+                                wasmparser::ElementItems::Functions(r) => r.count(),
+                                wasmparser::ElementItems::Expressions(_, r) => r.count(),
+                            };
                             if item_count > 0 {
                                 let skip = translator.config.rng().gen_range(0..item_count);
                                 translator.skip_inits = skip
@@ -214,8 +212,7 @@ impl Mutator for ConstExpressionMutator {
                         );
                         translator.translate_element(element, &mut new_section)?;
                     } else {
-                        let old_section = &translator.config.info().raw_sections[section];
-                        new_section.raw(&old_section.data[start..end]);
+                        DefaultTranslator.translate_element(element, &mut new_section)?;
                     }
                 }
                 let new_module = config.info().replace_section(section, &new_section);
@@ -290,9 +287,9 @@ mod tests {
     #[test]
     fn reduce_elem_funcref() {
         match_reduction(
-            r#"(module (table 0 funcref) (elem $a $b) (func $a) (func $b))"#,
+            r#"(module (table 0 funcref) (elem func $a $b) (func $a) (func $b))"#,
             super::ConstExpressionMutator::ElementFunc,
-            r#"(module (table 0 funcref) (elem $a $a) (func $a) (func $b))"#,
+            r#"(module (table 0 funcref) (elem func $a $a) (func $a) (func $b))"#,
         );
     }
 

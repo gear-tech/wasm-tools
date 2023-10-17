@@ -2,10 +2,13 @@ use super::{
     Elements, FuncType, GlobalInitExpr, Instruction, InstructionKind::*, InstructionKinds, Module,
     ValType,
 };
+use crate::unique_string;
 use arbitrary::{Result, Unstructured};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
-use wasm_encoder::{BlockType, MemArg};
+use std::rc::Rc;
+use wasm_encoder::{BlockType, ConstExpr, ExportKind, GlobalType, MemArg, RefType};
+mod no_traps;
 
 macro_rules! instructions {
 	(
@@ -24,7 +27,7 @@ macro_rules! instructions {
             allowed_instructions: InstructionKinds,
             builder: &mut CodeBuilder,
         ) -> Option<
-            fn(&mut Unstructured<'_>, &Module, &mut CodeBuilder) -> Result<Instruction>
+            fn(&mut Unstructured<'_>, &Module, &mut CodeBuilder, &mut Vec<Instruction>) -> Result<()>
         > {
             builder.allocs.options.clear();
             let mut cost = 0;
@@ -87,7 +90,7 @@ macro_rules! instructions {
 //    less than 1000.
 instructions! {
     // Control instructions.
-    (None, unreachable, Control, 990),
+    (Some(unreachable_valid), unreachable, Control, 990),
     (None, nop, Control, 800),
     (None, block, Control),
     (None, r#loop, Control),
@@ -104,6 +107,8 @@ instructions! {
     (Some(return_valid), r#return, Control, 900),
     (Some(call_valid), call, Control),
     (Some(call_indirect_valid), call_indirect, Control),
+    (Some(return_call_valid), return_call, Control),
+    (Some(return_call_indirect_valid), return_call_indirect, Control),
     (Some(throw_valid), throw, Control, 850),
     (Some(rethrow_valid), rethrow, Control),
     // Parametric instructions.
@@ -313,14 +318,14 @@ instructions! {
     (Some(simd_have_memory_and_offset), v128_load32_zero, Vector),
     (Some(simd_have_memory_and_offset), v128_load64_zero, Vector),
     (Some(simd_v128_store_valid), v128_store, Vector),
-    (Some(simd_have_memory_and_offset_and_v128), v128_load8_lane, Vector),
-    (Some(simd_have_memory_and_offset_and_v128), v128_load16_lane, Vector),
-    (Some(simd_have_memory_and_offset_and_v128), v128_load32_lane, Vector),
-    (Some(simd_have_memory_and_offset_and_v128), v128_load64_lane, Vector),
-    (Some(simd_v128_store_valid), v128_store8_lane, Vector),
-    (Some(simd_v128_store_valid), v128_store16_lane, Vector),
-    (Some(simd_v128_store_valid), v128_store32_lane, Vector),
-    (Some(simd_v128_store_valid), v128_store64_lane, Vector),
+    (Some(simd_load_lane_valid), v128_load8_lane, Vector),
+    (Some(simd_load_lane_valid), v128_load16_lane, Vector),
+    (Some(simd_load_lane_valid), v128_load32_lane, Vector),
+    (Some(simd_load_lane_valid), v128_load64_lane, Vector),
+    (Some(simd_store_lane_valid), v128_store8_lane, Vector),
+    (Some(simd_store_lane_valid), v128_store16_lane, Vector),
+    (Some(simd_store_lane_valid), v128_store32_lane, Vector),
+    (Some(simd_store_lane_valid), v128_store64_lane, Vector),
     (Some(simd_enabled), v128_const, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_shuffle, Vector),
     (Some(simd_v128_on_stack), i8x16_extract_lane_s, Vector),
@@ -346,10 +351,10 @@ instructions! {
     (Some(simd_v128_v128_on_stack), i8x16_swizzle, Vector),
     (Some(simd_v128_v128_on_stack_relaxed), i8x16_relaxed_swizzle, Vector),
     (Some(simd_v128_v128_v128_on_stack), v128_bitselect, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), i8x16_laneselect, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), i16x8_laneselect, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), i32x4_laneselect, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), i64x2_laneselect, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), i8x16_relaxed_laneselect, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), i16x8_relaxed_laneselect, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), i32x4_relaxed_laneselect, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), i64x2_relaxed_laneselect, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_eq, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_ne, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_lt_s, Vector),
@@ -424,7 +429,7 @@ instructions! {
     (Some(simd_v128_v128_on_stack), i8x16_min_u, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_max_s, Vector),
     (Some(simd_v128_v128_on_stack), i8x16_max_u, Vector),
-    (Some(simd_v128_v128_on_stack), i8x16_rounding_average_u, Vector),
+    (Some(simd_v128_v128_on_stack), i8x16_avgr_u, Vector),
     (Some(simd_v128_on_stack), i16x8_extadd_pairwise_i8x16s, Vector),
     (Some(simd_v128_on_stack), i16x8_extadd_pairwise_i8x16u, Vector),
     (Some(simd_v128_on_stack), i16x8_abs, Vector),
@@ -452,7 +457,7 @@ instructions! {
     (Some(simd_v128_v128_on_stack), i16x8_min_u, Vector),
     (Some(simd_v128_v128_on_stack), i16x8_max_s, Vector),
     (Some(simd_v128_v128_on_stack), i16x8_max_u, Vector),
-    (Some(simd_v128_v128_on_stack), i16x8_rounding_average_u, Vector),
+    (Some(simd_v128_v128_on_stack), i16x8_avgr_u, Vector),
     (Some(simd_v128_v128_on_stack), i16x8_extmul_low_i8x16s, Vector),
     (Some(simd_v128_v128_on_stack), i16x8_extmul_high_i8x16s, Vector),
     (Some(simd_v128_v128_on_stack), i16x8_extmul_low_i8x16u, Vector),
@@ -540,18 +545,21 @@ instructions! {
     (Some(simd_v128_on_stack), f64x2_convert_low_i32x4u, Vector),
     (Some(simd_v128_on_stack), f32x4_demote_f64x2_zero, Vector),
     (Some(simd_v128_on_stack), f64x2_promote_low_f32x4, Vector),
-    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_sat_f32x4s, Vector),
-    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_sat_f32x4u, Vector),
-    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_sat_f64x2s_zero, Vector),
-    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_sat_f64x2u_zero, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), f32x4_fma, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), f32x4_fms, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), f64x2_fma, Vector),
-    (Some(simd_v128_v128_v128_on_stack_relaxed), f64x2_fms, Vector),
+    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_f32x4s, Vector),
+    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_f32x4u, Vector),
+    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_f64x2s_zero, Vector),
+    (Some(simd_v128_on_stack_relaxed), i32x4_relaxed_trunc_f64x2u_zero, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), f32x4_relaxed_madd, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), f32x4_relaxed_nmadd, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), f64x2_relaxed_madd, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), f64x2_relaxed_nmadd, Vector),
     (Some(simd_v128_v128_on_stack_relaxed), f32x4_relaxed_min, Vector),
     (Some(simd_v128_v128_on_stack_relaxed), f32x4_relaxed_max, Vector),
     (Some(simd_v128_v128_on_stack_relaxed), f64x2_relaxed_min, Vector),
     (Some(simd_v128_v128_on_stack_relaxed), f64x2_relaxed_max, Vector),
+    (Some(simd_v128_v128_on_stack_relaxed), i16x8_relaxed_q15mulr_s, Vector),
+    (Some(simd_v128_v128_on_stack_relaxed), i16x8_relaxed_dot_i8x16_i7x16_s, Vector),
+    (Some(simd_v128_v128_v128_on_stack_relaxed), i32x4_relaxed_dot_i8x16_i7x16_add_s, Vector),
 }
 
 pub(crate) struct CodeBuilderAllocations {
@@ -564,7 +572,7 @@ pub(crate) struct CodeBuilderAllocations {
     // Dynamic set of options of instruction we can generate that are known to
     // be valid right now.
     options: Vec<(
-        fn(&mut Unstructured, &Module, &mut CodeBuilder) -> Result<Instruction>,
+        fn(&mut Unstructured, &Module, &mut CodeBuilder, &mut Vec<Instruction>) -> Result<()>,
         u32,
     )>,
 
@@ -576,7 +584,7 @@ pub(crate) struct CodeBuilderAllocations {
 
     // Like mutable globals above this is a map from function types to the list
     // of functions that have that function type.
-    functions: BTreeMap<Vec<ValType>, Vec<u32>>,
+    functions: BTreeMap<Rc<FuncType>, Vec<u32>>,
 
     // Like functions above this is a map from tag types to the list of tags
     // have that tag type.
@@ -598,6 +606,17 @@ pub(crate) struct CodeBuilderAllocations {
     // shouldn't ever look for i64 on the stack for `i32.load`.
     memory32: Vec<u32>,
     memory64: Vec<u32>,
+
+    // State used when dropping operands to avoid dropping them into the ether
+    // but instead folding their final values into module state, at this time
+    // chosen to be exported globals.
+    globals_cnt: u32,
+    new_globals: Vec<(ValType, ConstExpr)>,
+    global_dropped_i32: Option<u32>,
+    global_dropped_i64: Option<u32>,
+    global_dropped_f32: Option<u32>,
+    global_dropped_f64: Option<u32>,
+    global_dropped_v128: Option<u32>,
 }
 
 pub(crate) struct CodeBuilder<'a> {
@@ -677,7 +696,7 @@ impl CodeBuilderAllocations {
         let mut functions = BTreeMap::new();
         for (idx, func) in module.funcs() {
             functions
-                .entry(func.params.to_vec())
+                .entry(func.clone())
                 .or_insert(Vec::new())
                 .push(idx);
         }
@@ -686,7 +705,7 @@ impl CodeBuilderAllocations {
         let mut table_tys = Vec::new();
         for (i, table) in module.tables.iter().enumerate() {
             table_tys.push(table.element_type);
-            if table.element_type == ValType::FuncRef {
+            if table.element_type == RefType::FUNCREF {
                 funcref_tables.push(i as u32);
             }
         }
@@ -733,6 +752,14 @@ impl CodeBuilderAllocations {
             table_init_possible,
             memory32,
             memory64,
+
+            global_dropped_i32: None,
+            global_dropped_i64: None,
+            global_dropped_f32: None,
+            global_dropped_f64: None,
+            global_dropped_v128: None,
+            globals_cnt: module.globals.len() as u32,
+            new_globals: Vec::new(),
         }
     }
 
@@ -761,6 +788,30 @@ impl CodeBuilderAllocations {
             f64_scratch: None,
             v128_scratch: None,
         }
+    }
+
+    pub fn finish(self, u: &mut Unstructured<'_>, module: &mut Module) -> arbitrary::Result<()> {
+        // Any globals injected as part of dropping operands on the stack get
+        // injected into the module here. Each global is then exported, most of
+        // the time, to ensure it's part of the "image" of this module available
+        // for differential execution for example.
+        for (ty, init) in self.new_globals {
+            let global_idx = module.globals.len() as u32;
+            module.globals.push(GlobalType {
+                val_type: ty,
+                mutable: true,
+            });
+            let init = GlobalInitExpr::ConstExpr(init);
+            module.defined_globals.push((global_idx, init));
+
+            if u.ratio(1, 100).unwrap_or(false) {
+                continue;
+            }
+
+            let name = unique_string(1_000, &mut module.export_names, u)?;
+            module.add_arbitrary_export(name, ExportKind::Global, global_idx)?;
+        }
+        Ok(())
     }
 }
 
@@ -839,21 +890,28 @@ impl CodeBuilder<'_> {
             let keep_going = instructions.len() < max_instructions
                 && u.arbitrary().map_or(false, |b: u8| b != 0);
             if !keep_going {
-                self.end_active_control_frames(u, &mut instructions);
+                self.end_active_control_frames(
+                    u,
+                    &mut instructions,
+                    module.config.disallow_traps(),
+                )?;
                 break;
             }
 
             match choose_instruction(u, module, allowed_instructions, &mut self) {
                 Some(f) => {
-                    let inst = f(u, module, &mut self)?;
-                    instructions.push(inst);
+                    f(u, module, &mut self, &mut instructions)?;
                 }
                 // Choosing an instruction can fail because there is not enough
                 // underlying data, so we really cannot generate any more
                 // instructions. In this case we swallow that error and instead
                 // just terminate our wasm function's frames.
                 None => {
-                    self.end_active_control_frames(u, &mut instructions);
+                    self.end_active_control_frames(
+                        u,
+                        &mut instructions,
+                        module.config.disallow_traps(),
+                    )?;
                     break;
                 }
             }
@@ -928,25 +986,15 @@ impl CodeBuilder<'_> {
         // We'll need to temporarily save the top of the stack into a local, so
         // figure out that local here. Note that this tries to use the same
         // local if canonicalization happens more than once in a function.
-        let local = match ty {
-            Float::F32 => &mut self.f32_scratch,
-            Float::F64 => &mut self.f64_scratch,
-            Float::F32x4 | Float::F64x2 => &mut self.v128_scratch,
+        let (local, val_ty) = match ty {
+            Float::F32 => (&mut self.f32_scratch, ValType::F32),
+            Float::F64 => (&mut self.f64_scratch, ValType::F64),
+            Float::F32x4 | Float::F64x2 => (&mut self.v128_scratch, ValType::V128),
         };
         let local = match *local {
-            Some(i) => i,
-            None => {
-                let val = self.locals.len() + self.func_ty.params.len() + self.extra_locals.len();
-                *local = Some(val);
-                self.extra_locals.push(match ty {
-                    Float::F32 => ValType::F32,
-                    Float::F64 => ValType::F64,
-                    Float::F32x4 | Float::F64x2 => ValType::V128,
-                });
-                val
-            }
+            Some(i) => i as u32,
+            None => self.alloc_local(val_ty),
         };
-        let local = local as u32;
 
         // Save the previous instruction's result into a local. This also leaves
         // a value on the stack as `val1` for the `select` instruction.
@@ -996,15 +1044,22 @@ impl CodeBuilder<'_> {
         });
     }
 
+    fn alloc_local(&mut self, ty: ValType) -> u32 {
+        let val = self.locals.len() + self.func_ty.params.len() + self.extra_locals.len();
+        self.extra_locals.push(ty);
+        u32::try_from(val).unwrap()
+    }
+
     fn end_active_control_frames(
         &mut self,
         u: &mut Unstructured<'_>,
         instructions: &mut Vec<Instruction>,
-    ) {
+        disallow_traps: bool,
+    ) -> Result<()> {
         while !self.allocs.controls.is_empty() {
             // Ensure that this label is valid by placing the right types onto
             // the operand stack for the end of the label.
-            self.guarantee_label_results(u, instructions);
+            self.guarantee_label_results(u, instructions, disallow_traps)?;
 
             // Remove the label and clear the operand stack since the label has
             // been removed.
@@ -1020,7 +1075,7 @@ impl CodeBuilder<'_> {
                 self.allocs
                     .operands
                     .extend(label.params.into_iter().map(Some));
-                self.guarantee_label_results(u, instructions);
+                self.guarantee_label_results(u, instructions, disallow_traps)?;
                 self.allocs.controls.pop();
                 self.allocs.operands.truncate(label.height);
             }
@@ -1037,6 +1092,7 @@ impl CodeBuilder<'_> {
                 .operands
                 .extend(label.results.into_iter().map(Some));
         }
+        Ok(())
     }
 
     /// Modifies the instruction stream to guarantee that the current control
@@ -1045,21 +1101,22 @@ impl CodeBuilder<'_> {
         &mut self,
         u: &mut Unstructured<'_>,
         instructions: &mut Vec<Instruction>,
-    ) {
-        let mut operands = self.operands();
+        disallow_traps: bool,
+    ) -> Result<()> {
+        let operands = self.operands();
         let label = self.allocs.controls.last().unwrap();
 
         // Already done, yay!
         if label.results.len() == operands.len() && self.types_on_stack(&label.results) {
-            return;
+            return Ok(());
         }
 
         // Generating an unreachable instruction is always a valid way to
         // generate any types for a label, but it's not too interesting, so
         // don't favor it.
-        if u.arbitrary::<u16>().unwrap_or(0) == 1 {
+        if !disallow_traps && u.ratio(1, u16::MAX)? {
             instructions.push(Instruction::Unreachable);
-            return;
+            return Ok(());
         }
 
         // Arbitrarily massage the stack to get the expected results. First we
@@ -1068,21 +1125,128 @@ impl CodeBuilder<'_> {
         // up, figuring out what matches and what doesn't. As soon as something
         // doesn't match we throw out that and everything else remaining,
         // filling in results with dummy values.
-        while operands.len() > label.results.len() {
-            instructions.push(Instruction::Drop);
+        let operands = operands.to_vec();
+        let mut operands = operands.as_slice();
+        let label_results = label.results.to_vec();
+        while operands.len() > label_results.len() {
+            self.drop_operand(u, *operands.last().unwrap(), instructions)?;
             operands = &operands[..operands.len() - 1];
         }
-        for (i, expected) in label.results.iter().enumerate() {
+        for (i, expected) in label_results.iter().enumerate() {
             if let Some(actual) = operands.get(i) {
                 if Some(*expected) == *actual {
                     continue;
                 }
-                for _ in operands[i..].iter() {
-                    instructions.push(Instruction::Drop);
+                for ty in operands[i..].iter().rev() {
+                    self.drop_operand(u, *ty, instructions)?;
                 }
                 operands = &[];
             }
             instructions.push(arbitrary_val(*expected, u));
+        }
+        Ok(())
+    }
+
+    fn drop_operand(
+        &mut self,
+        u: &mut Unstructured<'_>,
+        ty: Option<ValType>,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        if !self.mix_operand_into_global(u, ty, instructions)? {
+            instructions.push(Instruction::Drop);
+        }
+        Ok(())
+    }
+
+    /// Attempts to drop the top operand on the stack by "mixing" it into a
+    /// global.
+    ///
+    /// This is done to avoid dropping values on the floor to ensure that
+    /// everything is part of some computation somewhere. Otherwise, for
+    /// example, most function results are dropped on the floor as the stack
+    /// won't happen to match the function type that we're generating.
+    ///
+    /// This will return `true` if the operand has been dropped, and `false` if
+    /// it didn't for one reason or another.
+    fn mix_operand_into_global(
+        &mut self,
+        u: &mut Unstructured<'_>,
+        ty: Option<ValType>,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool> {
+        // If the type of this operand isn't known, for example if it's relevant
+        // to unreachable code, then it can't be combined, so return `false`.
+        let ty = match ty {
+            Some(ty) => ty,
+            None => return Ok(false),
+        };
+
+        // Use the input stream to allow a small chance of dropping the value
+        // without combining it.
+        if u.ratio(1, 100)? {
+            return Ok(false);
+        }
+
+        // Depending on the type lookup or inject a global to place this value
+        // into.
+        let (global, combine) = match ty {
+            ValType::I32 => {
+                let global = *self.allocs.global_dropped_i32.get_or_insert_with(|| {
+                    self.allocs.new_globals.push((ty, ConstExpr::i32_const(0)));
+                    inc(&mut self.allocs.globals_cnt)
+                });
+                (global, Instruction::I32Xor)
+            }
+            ValType::I64 => {
+                let global = *self.allocs.global_dropped_i64.get_or_insert_with(|| {
+                    self.allocs.new_globals.push((ty, ConstExpr::i64_const(0)));
+                    inc(&mut self.allocs.globals_cnt)
+                });
+                (global, Instruction::I64Xor)
+            }
+            ValType::F32 => {
+                let global = *self.allocs.global_dropped_f32.get_or_insert_with(|| {
+                    self.allocs
+                        .new_globals
+                        .push((ValType::I32, ConstExpr::i32_const(0)));
+                    inc(&mut self.allocs.globals_cnt)
+                });
+                instructions.push(Instruction::I32ReinterpretF32);
+                (global, Instruction::I32Xor)
+            }
+            ValType::F64 => {
+                let global = *self.allocs.global_dropped_f64.get_or_insert_with(|| {
+                    self.allocs
+                        .new_globals
+                        .push((ValType::I64, ConstExpr::i64_const(0)));
+                    inc(&mut self.allocs.globals_cnt)
+                });
+                instructions.push(Instruction::I64ReinterpretF64);
+                (global, Instruction::I64Xor)
+            }
+            ValType::V128 => {
+                let global = *self.allocs.global_dropped_v128.get_or_insert_with(|| {
+                    self.allocs.new_globals.push((ty, ConstExpr::v128_const(0)));
+                    inc(&mut self.allocs.globals_cnt)
+                });
+                (global, Instruction::V128Xor)
+            }
+
+            // Don't know how to combine reference types at this time, so just
+            // let it get dropped.
+            ValType::Ref(_) => return Ok(false),
+        };
+        instructions.push(Instruction::GlobalGet(global));
+        instructions.push(combine);
+        instructions.push(Instruction::GlobalSet(global));
+
+        return Ok(true);
+
+        fn inc(val: &mut u32) -> u32 {
+            let ret = *val;
+            *val += 1;
+            ret
         }
     }
 }
@@ -1094,20 +1258,44 @@ fn arbitrary_val(ty: ValType, u: &mut Unstructured<'_>) -> Instruction {
         ValType::F32 => Instruction::F32Const(u.arbitrary().unwrap_or(0.0)),
         ValType::F64 => Instruction::F64Const(u.arbitrary().unwrap_or(0.0)),
         ValType::V128 => Instruction::V128Const(u.arbitrary().unwrap_or(0)),
-        ValType::ExternRef => Instruction::RefNull(ValType::ExternRef),
-        ValType::FuncRef => Instruction::RefNull(ValType::FuncRef),
+        ValType::Ref(ty) => {
+            assert!(ty.nullable);
+            Instruction::RefNull(ty.heap_type)
+        }
     }
 }
 
-fn unreachable(_: &mut Unstructured, _: &Module, _: &mut CodeBuilder) -> Result<Instruction> {
-    Ok(Instruction::Unreachable)
+#[inline]
+fn unreachable_valid(module: &Module, _: &mut CodeBuilder) -> bool {
+    !module.config.disallow_traps()
 }
 
-fn nop(_: &mut Unstructured, _: &Module, _: &mut CodeBuilder) -> Result<Instruction> {
-    Ok(Instruction::Nop)
+fn unreachable(
+    _: &mut Unstructured,
+    _: &Module,
+    _: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    instructions.push(Instruction::Unreachable);
+    Ok(())
 }
 
-fn block(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn nop(
+    _: &mut Unstructured,
+    _: &Module,
+    _: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    instructions.push(Instruction::Nop);
+    Ok(())
+}
+
+fn block(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let block_ty = builder.arbitrary_block_type(u, module)?;
     let (params, results) = module.params_results(&block_ty);
     let height = builder.allocs.operands.len() - params.len();
@@ -1117,7 +1305,8 @@ fn block(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Re
         results,
         height,
     });
-    Ok(Instruction::Block(block_ty))
+    instructions.push(Instruction::Block(block_ty));
+    Ok(())
 }
 
 #[inline]
@@ -1125,7 +1314,12 @@ fn try_valid(module: &Module, _: &mut CodeBuilder) -> bool {
     module.config.exceptions_enabled()
 }
 
-fn r#try(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn r#try(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let block_ty = builder.arbitrary_block_type(u, module)?;
     let (params, results) = module.params_results(&block_ty);
     let height = builder.allocs.operands.len() - params.len();
@@ -1135,7 +1329,8 @@ fn r#try(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Re
         results,
         height,
     });
-    Ok(Instruction::Try(block_ty))
+    instructions.push(Instruction::Try(block_ty));
+    Ok(())
 }
 
 #[inline]
@@ -1147,7 +1342,12 @@ fn delegate_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
         && end_valid(module, builder)
 }
 
-fn delegate(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn delegate(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     // There will always be at least the function's return frame and try
     // control frame if we are emitting delegate
     let n = builder.allocs.controls.iter().count();
@@ -1158,7 +1358,8 @@ fn delegate(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Resu
     let target_relative_from_outer = target_relative_from_last - 1;
     // Delegate ends the try block
     builder.allocs.controls.pop();
-    Ok(Instruction::Delegate(target_relative_from_outer as u32))
+    instructions.push(Instruction::Delegate(target_relative_from_outer as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1172,7 +1373,12 @@ fn catch_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
         && module.tags.len() > 0
 }
 
-fn catch(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn catch(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let tag_idx = u.int_in_range(0..=(module.tags.len() - 1))?;
     let tag_type = &module.tags[tag_idx];
     let control = builder.allocs.controls.pop().unwrap();
@@ -1184,7 +1390,8 @@ fn catch(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Re
         kind: ControlKind::Catch,
         ..control
     });
-    Ok(Instruction::Catch(tag_idx as u32))
+    instructions.push(Instruction::Catch(tag_idx as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1197,7 +1404,12 @@ fn catch_all_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
         && end_valid(module, builder)
 }
 
-fn catch_all(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn catch_all(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let control = builder.allocs.controls.pop().unwrap();
     // Pop the results for the previous try or catch
     builder.pop_operands(&control.results);
@@ -1205,10 +1417,16 @@ fn catch_all(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Res
         kind: ControlKind::CatchAll,
         ..control
     });
-    Ok(Instruction::CatchAll)
+    instructions.push(Instruction::CatchAll);
+    Ok(())
 }
 
-fn r#loop(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn r#loop(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let block_ty = builder.arbitrary_block_type(u, module)?;
     let (params, results) = module.params_results(&block_ty);
     let height = builder.allocs.operands.len() - params.len();
@@ -1218,7 +1436,8 @@ fn r#loop(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> R
         results,
         height,
     });
-    Ok(Instruction::Loop(block_ty))
+    instructions.push(Instruction::Loop(block_ty));
+    Ok(())
 }
 
 #[inline]
@@ -1226,7 +1445,12 @@ fn if_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.type_on_stack(ValType::I32)
 }
 
-fn r#if(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn r#if(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
 
     let block_ty = builder.arbitrary_block_type(u, module)?;
@@ -1238,7 +1462,8 @@ fn r#if(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Res
         results,
         height,
     });
-    Ok(Instruction::If(block_ty))
+    instructions.push(Instruction::If(block_ty));
+    Ok(())
 }
 
 #[inline]
@@ -1249,7 +1474,12 @@ fn else_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         && builder.types_on_stack(&last_control.results)
 }
 
-fn r#else(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn r#else(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let control = builder.allocs.controls.pop().unwrap();
     builder.pop_operands(&control.results);
     builder.push_operands(&control.params);
@@ -1257,7 +1487,8 @@ fn r#else(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result
         kind: ControlKind::Block,
         ..control
     });
-    Ok(Instruction::Else)
+    instructions.push(Instruction::Else);
+    Ok(())
 }
 
 #[inline]
@@ -1275,9 +1506,15 @@ fn end_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         && !(control.kind == ControlKind::If && control.params != control.results)
 }
 
-fn end(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn end(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.allocs.controls.pop();
-    Ok(Instruction::End)
+    instructions.push(Instruction::End);
+    Ok(())
 }
 
 #[inline]
@@ -1289,7 +1526,12 @@ fn br_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         .any(|l| builder.label_types_on_stack(l))
 }
 
-fn br(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn br(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let n = builder
         .allocs
         .controls
@@ -1310,7 +1552,8 @@ fn br(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Ins
     let control = &builder.allocs.controls[builder.allocs.controls.len() - 1 - target];
     let tys = control.label_types().to_vec();
     builder.pop_operands(&tys);
-    Ok(Instruction::Br(target as u32))
+    instructions.push(Instruction::Br(target as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1328,7 +1571,12 @@ fn br_if_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     is_valid
 }
 
-fn br_if(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn br_if(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
 
     let n = builder
@@ -1348,7 +1596,8 @@ fn br_if(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<
         .filter(|(_, l)| builder.label_types_on_stack(l))
         .nth(i)
         .unwrap();
-    Ok(Instruction::BrIf(target as u32))
+    instructions.push(Instruction::BrIf(target as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1362,7 +1611,12 @@ fn br_table_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     is_valid
 }
 
-fn br_table(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn br_table(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
 
     let n = builder
@@ -1398,7 +1652,8 @@ fn br_table(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Resu
     let tys = control.label_types().to_vec();
     builder.pop_operands(&tys);
 
-    Ok(Instruction::BrTable(targets, default_target as u32))
+    instructions.push(Instruction::BrTable(targets, default_target as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1406,10 +1661,16 @@ fn return_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.label_types_on_stack(&builder.allocs.controls[0])
 }
 
-fn r#return(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn r#return(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let results = builder.allocs.controls[0].results.clone();
     builder.pop_operands(&results);
-    Ok(Instruction::Return)
+    instructions.push(Instruction::Return);
+    Ok(())
 }
 
 #[inline]
@@ -1418,15 +1679,20 @@ fn call_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         .allocs
         .functions
         .keys()
-        .any(|k| builder.types_on_stack(k))
+        .any(|func_ty| builder.types_on_stack(&func_ty.params))
 }
 
-fn call(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn call(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let candidates = builder
         .allocs
         .functions
         .iter()
-        .filter(|(k, _)| builder.types_on_stack(k))
+        .filter(|(func_ty, _)| builder.types_on_stack(&func_ty.params))
         .flat_map(|(_, v)| v.iter().copied())
         .collect::<Vec<_>>();
     assert!(candidates.len() > 0);
@@ -1434,12 +1700,20 @@ fn call(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Res
     let (func_idx, ty) = module.funcs().nth(candidates[i] as usize).unwrap();
     builder.pop_operands(&ty.params);
     builder.push_operands(&ty.results);
-    Ok(Instruction::Call(func_idx as u32))
+    instructions.push(Instruction::Call(func_idx as u32));
+    Ok(())
 }
 
 #[inline]
 fn call_indirect_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     if builder.allocs.funcref_tables.is_empty() || !builder.type_on_stack(ValType::I32) {
+        return false;
+    }
+    if module.config.disallow_traps() {
+        // We have no way to reflect, at run time, on a `funcref` in
+        // the `i`th slot in a table and dynamically avoid trapping
+        // `call_indirect`s. Therefore, we can't emit *any*
+        // `call_indirect` instructions if we want to avoid traps.
         return false;
     }
     let ty = builder.allocs.operands.pop().unwrap();
@@ -1454,7 +1728,8 @@ fn call_indirect(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
 
     let choices = module
@@ -1465,10 +1740,97 @@ fn call_indirect(
     builder.pop_operands(&ty.params);
     builder.push_operands(&ty.results);
     let table = *u.choose(&builder.allocs.funcref_tables)?;
-    Ok(Instruction::CallIndirect {
+    instructions.push(Instruction::CallIndirect {
         ty: *type_idx as u32,
         table,
+    });
+    Ok(())
+}
+
+#[inline]
+fn return_call_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
+    if !module.config.tail_call_enabled() {
+        return false;
+    }
+
+    builder.allocs.functions.keys().any(|func_ty| {
+        builder.types_on_stack(&func_ty.params)
+            && builder.allocs.controls[0].label_types() == &func_ty.results
     })
+}
+
+fn return_call(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    let candidates = builder
+        .allocs
+        .functions
+        .iter()
+        .filter(|(func_ty, _)| {
+            builder.types_on_stack(&func_ty.params)
+                && builder.allocs.controls[0].label_types() == &func_ty.results
+        })
+        .flat_map(|(_, v)| v.iter().copied())
+        .collect::<Vec<_>>();
+    assert!(candidates.len() > 0);
+    let i = u.int_in_range(0..=candidates.len() - 1)?;
+    let (func_idx, ty) = module.funcs().nth(candidates[i] as usize).unwrap();
+    builder.pop_operands(&ty.params);
+    builder.push_operands(&ty.results);
+    instructions.push(Instruction::ReturnCall(func_idx as u32));
+    Ok(())
+}
+
+#[inline]
+fn return_call_indirect_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
+    if !module.config.tail_call_enabled()
+        || builder.allocs.funcref_tables.is_empty()
+        || !builder.type_on_stack(ValType::I32)
+    {
+        return false;
+    }
+
+    if module.config.disallow_traps() {
+        // See comment in `call_indirect_valid`; same applies here.
+        return false;
+    }
+
+    let ty = builder.allocs.operands.pop().unwrap();
+    let is_valid = module.func_types().any(|(_, ty)| {
+        builder.types_on_stack(&ty.params)
+            && builder.allocs.controls[0].label_types() == &ty.results
+    });
+    builder.allocs.operands.push(ty);
+    is_valid
+}
+
+fn return_call_indirect(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    builder.pop_operands(&[ValType::I32]);
+
+    let choices = module
+        .func_types()
+        .filter(|(_, ty)| {
+            builder.types_on_stack(&ty.params)
+                && builder.allocs.controls[0].label_types() == &ty.results
+        })
+        .collect::<Vec<_>>();
+    let (type_idx, ty) = u.choose(&choices)?;
+    builder.pop_operands(&ty.params);
+    builder.push_operands(&ty.results);
+    let table = *u.choose(&builder.allocs.funcref_tables)?;
+    instructions.push(Instruction::ReturnCallIndirect {
+        ty: *type_idx as u32,
+        table,
+    });
+    Ok(())
 }
 
 #[inline]
@@ -1481,7 +1843,12 @@ fn throw_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
             .any(|k| builder.types_on_stack(k))
 }
 
-fn throw(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn throw(
+    u: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let candidates = builder
         .allocs
         .tags
@@ -1495,7 +1862,8 @@ fn throw(u: &mut Unstructured, module: &Module, builder: &mut CodeBuilder) -> Re
     // Tags have no results, throwing cannot return
     assert!(tag_type.func_type.results.len() == 0);
     builder.pop_operands(&tag_type.func_type.params);
-    Ok(Instruction::Throw(tag_idx as u32))
+    instructions.push(Instruction::Throw(tag_idx as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1509,7 +1877,12 @@ fn rethrow_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
             .any(|l| l.kind == ControlKind::Catch || l.kind == ControlKind::CatchAll)
 }
 
-fn rethrow(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn rethrow(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let n = builder
         .allocs
         .controls
@@ -1527,7 +1900,8 @@ fn rethrow(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Resul
         .filter(|(_, l)| l.kind == ControlKind::Catch || l.kind == ControlKind::CatchAll)
         .nth(i)
         .unwrap();
-    Ok(Instruction::Rethrow(target as u32))
+    instructions.push(Instruction::Rethrow(target as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1535,9 +1909,15 @@ fn drop_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     !builder.operands().is_empty()
 }
 
-fn drop(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
-    builder.allocs.operands.pop();
-    Ok(Instruction::Drop)
+fn drop(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    let ty = builder.allocs.operands.pop().unwrap();
+    builder.drop_operand(u, ty, instructions)?;
+    Ok(())
 }
 
 #[inline]
@@ -1550,19 +1930,23 @@ fn select_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     t.is_none() || u.is_none() || t == u
 }
 
-fn select(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn select(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.allocs.operands.pop();
     let t = builder.allocs.operands.pop().unwrap();
     let u = builder.allocs.operands.pop().unwrap();
     let ty = t.or(u);
     builder.allocs.operands.push(ty);
     match ty {
-        Some(ty @ ValType::ExternRef) | Some(ty @ ValType::FuncRef) => {
-            Ok(Instruction::TypedSelect(ty))
-        }
+        Some(ty @ ValType::Ref(_)) => instructions.push(Instruction::TypedSelect(ty)),
         Some(ValType::I32) | Some(ValType::I64) | Some(ValType::F32) | Some(ValType::F64)
-        | Some(ValType::V128) | None => Ok(Instruction::Select),
+        | Some(ValType::V128) | None => instructions.push(Instruction::Select),
     }
+    Ok(())
 }
 
 #[inline]
@@ -1570,7 +1954,12 @@ fn local_get_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
     !builder.func_ty.params.is_empty() || !builder.locals.is_empty()
 }
 
-fn local_get(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn local_get(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let num_params = builder.func_ty.params.len();
     let n = num_params + builder.locals.len();
     debug_assert!(n > 0);
@@ -1580,7 +1969,8 @@ fn local_get(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Res
     } else {
         builder.locals[i - num_params]
     }));
-    Ok(Instruction::LocalGet(i as u32))
+    instructions.push(Instruction::LocalGet(i as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1593,7 +1983,12 @@ fn local_set_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         .any(|ty| builder.type_on_stack(*ty))
 }
 
-fn local_set(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn local_set(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let n = builder
         .func_ty
         .params
@@ -1613,10 +2008,16 @@ fn local_set(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Res
         .nth(i)
         .unwrap();
     builder.allocs.operands.pop();
-    Ok(Instruction::LocalSet(j as u32))
+    instructions.push(Instruction::LocalSet(j as u32));
+    Ok(())
 }
 
-fn local_tee(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn local_tee(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let n = builder
         .func_ty
         .params
@@ -1635,7 +2036,8 @@ fn local_tee(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Res
         .filter(|(_, ty)| builder.type_on_stack(**ty))
         .nth(i)
         .unwrap();
-    Ok(Instruction::LocalTee(j as u32))
+    instructions.push(Instruction::LocalTee(j as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1647,14 +2049,16 @@ fn global_get(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     debug_assert!(module.globals.len() > 0);
     let global_idx = u.int_in_range(0..=module.globals.len() - 1)?;
     builder
         .allocs
         .operands
         .push(Some(module.globals[global_idx].val_type));
-    Ok(Instruction::GlobalGet(global_idx as u32))
+    instructions.push(Instruction::GlobalGet(global_idx as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1666,7 +2070,12 @@ fn global_set_valid(_: &Module, builder: &mut CodeBuilder) -> bool {
         .any(|(ty, _)| builder.type_on_stack(*ty))
 }
 
-fn global_set(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn global_set(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let candidates = builder
         .allocs
         .mutable_globals
@@ -1676,7 +2085,8 @@ fn global_set(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Re
         .1;
     let i = u.int_in_range(0..=candidates.len() - 1)?;
     builder.allocs.operands.pop();
-    Ok(Instruction::GlobalSet(candidates[i]))
+    instructions.push(Instruction::GlobalSet(candidates[i]));
+    Ok(())
 }
 
 #[inline]
@@ -1711,140 +2121,274 @@ fn i32_load(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
     builder.allocs.operands.push(Some(ValType::I32));
-    Ok(Instruction::I32Load(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(Instruction::I32Load(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32Load(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2, 3])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(Instruction::I64Load(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64Load(memarg));
+    }
+    Ok(())
 }
 
 fn f32_load(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
     builder.allocs.operands.push(Some(ValType::F32));
-    Ok(Instruction::F32Load(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(Instruction::F32Load(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::F32Load(memarg));
+    }
+    Ok(())
 }
 
 fn f64_load(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2, 3])?;
     builder.allocs.operands.push(Some(ValType::F64));
-    Ok(Instruction::F64Load(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(Instruction::F64Load(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::F64Load(memarg));
+    }
+    Ok(())
 }
 
 fn i32_load_8_s(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0])?;
     builder.allocs.operands.push(Some(ValType::I32));
-    Ok(Instruction::I32Load8_S(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I32Load8S(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Load8S(memarg));
+    }
+    Ok(())
 }
 
 fn i32_load_8_u(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0])?;
     builder.allocs.operands.push(Some(ValType::I32));
-    Ok(Instruction::I32Load8_U(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I32Load8U(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Load8U(memarg));
+    }
+    Ok(())
 }
 
 fn i32_load_16_s(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
     builder.allocs.operands.push(Some(ValType::I32));
-    Ok(Instruction::I32Load16_S(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I32Load16S(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Load16S(memarg));
+    }
+    Ok(())
 }
 
 fn i32_load_16_u(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
     builder.allocs.operands.push(Some(ValType::I32));
-    Ok(Instruction::I32Load16_U(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I32Load16U(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Load16U(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_8_s(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load8_S(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load8S(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load8S(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_16_s(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load16_S(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load16S(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load16S(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_32_s(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load32_S(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load32S(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load32S(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_8_u(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load8_U(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load8U(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load8U(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_16_u(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load16_U(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load16U(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load16U(memarg));
+    }
+    Ok(())
 }
 
 fn i64_load_32_u(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
     builder.allocs.operands.push(Some(ValType::I64));
-    Ok(Instruction::I64Load32_U(memarg))
+    if module.config.disallow_traps() {
+        no_traps::load(
+            Instruction::I64Load32U(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Load32U(memarg));
+    }
+    Ok(())
 }
 
 #[inline]
@@ -1862,10 +2406,16 @@ fn i32_store(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
-    Ok(Instruction::I32Store(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(Instruction::I32Store(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32Store(memarg));
+    }
+    Ok(())
 }
 
 #[inline]
@@ -1877,10 +2427,16 @@ fn i64_store(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2, 3])?;
-    Ok(Instruction::I64Store(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(Instruction::I64Store(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64Store(memarg));
+    }
+    Ok(())
 }
 
 #[inline]
@@ -1892,10 +2448,16 @@ fn f32_store(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
-    Ok(Instruction::F32Store(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(Instruction::F32Store(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::F32Store(memarg));
+    }
+    Ok(())
 }
 
 #[inline]
@@ -1907,67 +2469,129 @@ fn f64_store(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2, 3])?;
-    Ok(Instruction::F64Store(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(Instruction::F64Store(memarg), module, builder, instructions);
+    } else {
+        instructions.push(Instruction::F64Store(memarg));
+    }
+    Ok(())
 }
 
 fn i32_store_8(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let memarg = mem_arg(u, module, builder, &[0])?;
-    Ok(Instruction::I32Store8(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::I32Store8(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Store8(memarg));
+    }
+    Ok(())
 }
 
 fn i32_store_16(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
-    Ok(Instruction::I32Store16(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::I32Store16(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I32Store16(memarg));
+    }
+    Ok(())
 }
 
 fn i64_store_8(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     let memarg = mem_arg(u, module, builder, &[0])?;
-    Ok(Instruction::I64Store8(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::I64Store8(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Store8(memarg));
+    }
+    Ok(())
 }
 
 fn i64_store_16(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     let memarg = mem_arg(u, module, builder, &[0, 1])?;
-    Ok(Instruction::I64Store16(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::I64Store16(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Store16(memarg));
+    }
+    Ok(())
 }
 
 fn i64_store_32(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2])?;
-    Ok(Instruction::I64Store32(memarg))
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::I64Store32(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::I64Store32(memarg));
+    }
+    Ok(())
 }
 
 fn memory_size(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let i = u.int_in_range(0..=module.memories.len() - 1)?;
     let ty = if module.memories[i].memory64 {
         ValType::I64
@@ -1975,7 +2599,8 @@ fn memory_size(
         ValType::I32
     };
     builder.push_operands(&[ty]);
-    Ok(Instruction::MemorySize(i as u32))
+    instructions.push(Instruction::MemorySize(i as u32));
+    Ok(())
 }
 
 #[inline]
@@ -1989,7 +2614,8 @@ fn memory_grow(
     u: &mut Unstructured,
     _module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let ty = if builder.type_on_stack(ValType::I32) {
         ValType::I32
     } else {
@@ -1998,13 +2624,15 @@ fn memory_grow(
     let index = memory_index(u, builder, ty)?;
     builder.pop_operands(&[ty]);
     builder.push_operands(&[ty]);
-    Ok(Instruction::MemoryGrow(index))
+    instructions.push(Instruction::MemoryGrow(index));
+    Ok(())
 }
 
 #[inline]
 fn memory_init_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.bulk_memory_enabled()
         && have_data(module, builder)
+        && !module.config.disallow_traps() // Non-trapping memory init not yet implemented
         && (builder.allocs.memory32.len() > 0
             && builder.types_on_stack(&[ValType::I32, ValType::I32, ValType::I32])
             || (builder.allocs.memory64.len() > 0
@@ -2015,7 +2643,8 @@ fn memory_init(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     let ty = if builder.type_on_stack(ValType::I32) {
         ValType::I32
@@ -2023,14 +2652,16 @@ fn memory_init(
         ValType::I64
     };
     let mem = memory_index(u, builder, ty)?;
-    let data = data_index(u, module)?;
+    let data_index = data_index(u, module)?;
     builder.pop_operands(&[ty]);
-    Ok(Instruction::MemoryInit { mem, data })
+    instructions.push(Instruction::MemoryInit { mem, data_index });
+    Ok(())
 }
 
 #[inline]
 fn memory_fill_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.bulk_memory_enabled()
+        && !module.config.disallow_traps() // Non-trapping memory fill generation not yet implemented
         && (builder.allocs.memory32.len() > 0
             && builder.types_on_stack(&[ValType::I32, ValType::I32, ValType::I32])
             || (builder.allocs.memory64.len() > 0
@@ -2041,7 +2672,8 @@ fn memory_fill(
     u: &mut Unstructured,
     _module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let ty = if builder.type_on_stack(ValType::I32) {
         ValType::I32
     } else {
@@ -2049,12 +2681,19 @@ fn memory_fill(
     };
     let mem = memory_index(u, builder, ty)?;
     builder.pop_operands(&[ty, ValType::I32, ty]);
-    Ok(Instruction::MemoryFill(mem))
+    instructions.push(Instruction::MemoryFill(mem));
+    Ok(())
 }
 
 #[inline]
 fn memory_copy_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     if !module.config.bulk_memory_enabled() {
+        return false;
+    }
+
+    // The non-trapping case for memory copy has not yet been implemented,
+    // so we are excluding them for now
+    if module.config.disallow_traps() {
         return false;
     }
 
@@ -2087,8 +2726,10 @@ fn memory_copy(
     u: &mut Unstructured,
     _module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
-    let (src, dst) = if builder.types_on_stack(&[ValType::I64, ValType::I64, ValType::I64]) {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    let (src_mem, dst_mem) = if builder.types_on_stack(&[ValType::I64, ValType::I64, ValType::I64])
+    {
         builder.pop_operands(&[ValType::I64, ValType::I64, ValType::I64]);
         (
             memory_index(u, builder, ValType::I64)?,
@@ -2115,7 +2756,8 @@ fn memory_copy(
     } else {
         unreachable!()
     };
-    Ok(Instruction::MemoryCopy { dst, src })
+    instructions.push(Instruction::MemoryCopy { dst_mem, src_mem });
+    Ok(())
 }
 
 #[inline]
@@ -2127,32 +2769,58 @@ fn data_drop(
     u: &mut Unstructured,
     module: &Module,
     _builder: &mut CodeBuilder,
-) -> Result<Instruction> {
-    Ok(Instruction::DataDrop(data_index(u, module)?))
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    instructions.push(Instruction::DataDrop(data_index(u, module)?));
+    Ok(())
 }
 
-fn i32_const(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_const(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let x = u.arbitrary()?;
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Const(x))
+    instructions.push(Instruction::I32Const(x));
+    Ok(())
 }
 
-fn i64_const(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_const(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let x = u.arbitrary()?;
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Const(x))
+    instructions.push(Instruction::I64Const(x));
+    Ok(())
 }
 
-fn f32_const(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_const(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let x = u.arbitrary()?;
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Const(x))
+    instructions.push(Instruction::F32Const(x));
+    Ok(())
 }
 
-fn f64_const(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_const(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let x = u.arbitrary()?;
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Const(x))
+    instructions.push(Instruction::F64Const(x));
+    Ok(())
 }
 
 #[inline]
@@ -2165,10 +2833,16 @@ fn i32_on_stack(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.type_on_stack(ValType::I32)
 }
 
-fn i32_eqz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_eqz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Eqz)
+    instructions.push(Instruction::I32Eqz);
+    Ok(())
 }
 
 #[inline]
@@ -2176,64 +2850,124 @@ fn i32_i32_on_stack(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.types_on_stack(&[ValType::I32, ValType::I32])
 }
 
-fn i32_eq(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_eq(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Eq)
+    instructions.push(Instruction::I32Eq);
+    Ok(())
 }
 
-fn i32_ne(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_ne(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Ne)
+    instructions.push(Instruction::I32Ne);
+    Ok(())
 }
 
-fn i32_lt_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_lt_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32LtS)
+    instructions.push(Instruction::I32LtS);
+    Ok(())
 }
 
-fn i32_lt_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_lt_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32LtU)
+    instructions.push(Instruction::I32LtU);
+    Ok(())
 }
 
-fn i32_gt_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_gt_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32GtS)
+    instructions.push(Instruction::I32GtS);
+    Ok(())
 }
 
-fn i32_gt_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_gt_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32GtU)
+    instructions.push(Instruction::I32GtU);
+    Ok(())
 }
 
-fn i32_le_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_le_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32LeS)
+    instructions.push(Instruction::I32LeS);
+    Ok(())
 }
 
-fn i32_le_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_le_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32LeU)
+    instructions.push(Instruction::I32LeU);
+    Ok(())
 }
 
-fn i32_ge_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_ge_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32GeS)
+    instructions.push(Instruction::I32GeS);
+    Ok(())
 }
 
-fn i32_ge_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_ge_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32GeU)
+    instructions.push(Instruction::I32GeU);
+    Ok(())
 }
 
 #[inline]
@@ -2246,10 +2980,16 @@ fn i64_on_stack(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.types_on_stack(&[ValType::I64])
 }
 
-fn i64_eqz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_eqz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64Eqz)
+    instructions.push(Instruction::I64Eqz);
+    Ok(())
 }
 
 #[inline]
@@ -2257,360 +2997,740 @@ fn i64_i64_on_stack(_: &Module, builder: &mut CodeBuilder) -> bool {
     builder.types_on_stack(&[ValType::I64, ValType::I64])
 }
 
-fn i64_eq(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_eq(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64Eq)
+    instructions.push(Instruction::I64Eq);
+    Ok(())
 }
 
-fn i64_ne(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_ne(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64Ne)
+    instructions.push(Instruction::I64Ne);
+    Ok(())
 }
 
-fn i64_lt_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_lt_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64LtS)
+    instructions.push(Instruction::I64LtS);
+    Ok(())
 }
 
-fn i64_lt_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_lt_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64LtU)
+    instructions.push(Instruction::I64LtU);
+    Ok(())
 }
 
-fn i64_gt_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_gt_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64GtS)
+    instructions.push(Instruction::I64GtS);
+    Ok(())
 }
 
-fn i64_gt_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_gt_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64GtU)
+    instructions.push(Instruction::I64GtU);
+    Ok(())
 }
 
-fn i64_le_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_le_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64LeS)
+    instructions.push(Instruction::I64LeS);
+    Ok(())
 }
 
-fn i64_le_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_le_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64LeU)
+    instructions.push(Instruction::I64LeU);
+    Ok(())
 }
 
-fn i64_ge_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_ge_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64GeS)
+    instructions.push(Instruction::I64GeS);
+    Ok(())
 }
 
-fn i64_ge_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_ge_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I64GeU)
+    instructions.push(Instruction::I64GeU);
+    Ok(())
 }
 
 fn f32_f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.float_enabled() && builder.types_on_stack(&[ValType::F32, ValType::F32])
 }
 
-fn f32_eq(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_eq(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Eq)
+    instructions.push(Instruction::F32Eq);
+    Ok(())
 }
 
-fn f32_ne(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_ne(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Ne)
+    instructions.push(Instruction::F32Ne);
+    Ok(())
 }
 
-fn f32_lt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_lt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Lt)
+    instructions.push(Instruction::F32Lt);
+    Ok(())
 }
 
-fn f32_gt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_gt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Gt)
+    instructions.push(Instruction::F32Gt);
+    Ok(())
 }
 
-fn f32_le(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_le(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Le)
+    instructions.push(Instruction::F32Le);
+    Ok(())
 }
 
-fn f32_ge(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_ge(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F32Ge)
+    instructions.push(Instruction::F32Ge);
+    Ok(())
 }
 
 fn f64_f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.float_enabled() && builder.types_on_stack(&[ValType::F64, ValType::F64])
 }
 
-fn f64_eq(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_eq(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Eq)
+    instructions.push(Instruction::F64Eq);
+    Ok(())
 }
 
-fn f64_ne(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_ne(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Ne)
+    instructions.push(Instruction::F64Ne);
+    Ok(())
 }
 
-fn f64_lt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_lt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Lt)
+    instructions.push(Instruction::F64Lt);
+    Ok(())
 }
 
-fn f64_gt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_gt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Gt)
+    instructions.push(Instruction::F64Gt);
+    Ok(())
 }
 
-fn f64_le(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_le(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Le)
+    instructions.push(Instruction::F64Le);
+    Ok(())
 }
 
-fn f64_ge(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_ge(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::F64Ge)
+    instructions.push(Instruction::F64Ge);
+    Ok(())
 }
 
-fn i32_clz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_clz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Clz)
+    instructions.push(Instruction::I32Clz);
+    Ok(())
 }
 
-fn i32_ctz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_ctz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Ctz)
+    instructions.push(Instruction::I32Ctz);
+    Ok(())
 }
 
-fn i32_popcnt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_popcnt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Popcnt)
+    instructions.push(Instruction::I32Popcnt);
+    Ok(())
 }
 
-fn i32_add(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_add(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Add)
+    instructions.push(Instruction::I32Add);
+    Ok(())
 }
 
-fn i32_sub(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_sub(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Sub)
+    instructions.push(Instruction::I32Sub);
+    Ok(())
 }
 
-fn i32_mul(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_mul(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Mul)
+    instructions.push(Instruction::I32Mul);
+    Ok(())
 }
 
-fn i32_div_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_div_s(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32DivS)
+    if module.config.disallow_traps() {
+        no_traps::signed_div_rem(Instruction::I32DivS, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32DivS);
+    }
+    Ok(())
 }
 
-fn i32_div_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_div_u(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32DivU)
+    if module.config.disallow_traps() {
+        no_traps::unsigned_div_rem(Instruction::I32DivU, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32DivU);
+    }
+    Ok(())
 }
 
-fn i32_rem_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_rem_s(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32RemS)
+    if module.config.disallow_traps() {
+        no_traps::signed_div_rem(Instruction::I32RemS, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32RemS);
+    }
+    Ok(())
 }
 
-fn i32_rem_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_rem_u(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32RemU)
+    if module.config.disallow_traps() {
+        no_traps::unsigned_div_rem(Instruction::I32RemU, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32RemU);
+    }
+    Ok(())
 }
 
-fn i32_and(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_and(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32And)
+    instructions.push(Instruction::I32And);
+    Ok(())
 }
 
-fn i32_or(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_or(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Or)
+    instructions.push(Instruction::I32Or);
+    Ok(())
 }
 
-fn i32_xor(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_xor(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Xor)
+    instructions.push(Instruction::I32Xor);
+    Ok(())
 }
 
-fn i32_shl(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_shl(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Shl)
+    instructions.push(Instruction::I32Shl);
+    Ok(())
 }
 
-fn i32_shr_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_shr_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32ShrS)
+    instructions.push(Instruction::I32ShrS);
+    Ok(())
 }
 
-fn i32_shr_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_shr_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32ShrU)
+    instructions.push(Instruction::I32ShrU);
+    Ok(())
 }
 
-fn i32_rotl(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_rotl(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Rotl)
+    instructions.push(Instruction::I32Rotl);
+    Ok(())
 }
 
-fn i32_rotr(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i32_rotr(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Rotr)
+    instructions.push(Instruction::I32Rotr);
+    Ok(())
 }
 
-fn i64_clz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_clz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Clz)
+    instructions.push(Instruction::I64Clz);
+    Ok(())
 }
 
-fn i64_ctz(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_ctz(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Ctz)
+    instructions.push(Instruction::I64Ctz);
+    Ok(())
 }
 
-fn i64_popcnt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_popcnt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Popcnt)
+    instructions.push(Instruction::I64Popcnt);
+    Ok(())
 }
 
-fn i64_add(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_add(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Add)
+    instructions.push(Instruction::I64Add);
+    Ok(())
 }
 
-fn i64_sub(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_sub(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Sub)
+    instructions.push(Instruction::I64Sub);
+    Ok(())
 }
 
-fn i64_mul(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_mul(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Mul)
+    instructions.push(Instruction::I64Mul);
+    Ok(())
 }
 
-fn i64_div_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_div_s(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64DivS)
+    if module.config.disallow_traps() {
+        no_traps::signed_div_rem(Instruction::I64DivS, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64DivS);
+    }
+    Ok(())
 }
 
-fn i64_div_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_div_u(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64DivU)
+    if module.config.disallow_traps() {
+        no_traps::unsigned_div_rem(Instruction::I64DivU, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64DivU);
+    }
+    Ok(())
 }
 
-fn i64_rem_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_rem_s(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64RemS)
+    if module.config.disallow_traps() {
+        no_traps::signed_div_rem(Instruction::I64RemS, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64RemS);
+    }
+    Ok(())
 }
 
-fn i64_rem_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_rem_u(
+    _: &mut Unstructured,
+    module: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64RemU)
+    if module.config.disallow_traps() {
+        no_traps::unsigned_div_rem(Instruction::I64RemU, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64RemU);
+    }
+    Ok(())
 }
 
-fn i64_and(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_and(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64And)
+    instructions.push(Instruction::I64And);
+    Ok(())
 }
 
-fn i64_or(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_or(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Or)
+    instructions.push(Instruction::I64Or);
+    Ok(())
 }
 
-fn i64_xor(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_xor(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Xor)
+    instructions.push(Instruction::I64Xor);
+    Ok(())
 }
 
-fn i64_shl(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_shl(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Shl)
+    instructions.push(Instruction::I64Shl);
+    Ok(())
 }
 
-fn i64_shr_s(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_shr_s(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64ShrS)
+    instructions.push(Instruction::I64ShrS);
+    Ok(())
 }
 
-fn i64_shr_u(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_shr_u(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64ShrU)
+    instructions.push(Instruction::I64ShrU);
+    Ok(())
 }
 
-fn i64_rotl(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_rotl(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Rotl)
+    instructions.push(Instruction::I64Rotl);
+    Ok(())
 }
 
-fn i64_rotr(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn i64_rotr(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64, ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Rotr)
+    instructions.push(Instruction::I64Rotr);
+    Ok(())
 }
 
 #[inline]
@@ -2618,92 +3738,172 @@ fn f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.float_enabled() && builder.types_on_stack(&[ValType::F32])
 }
 
-fn f32_abs(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_abs(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Abs)
+    instructions.push(Instruction::F32Abs);
+    Ok(())
 }
 
-fn f32_neg(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_neg(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Neg)
+    instructions.push(Instruction::F32Neg);
+    Ok(())
 }
 
-fn f32_ceil(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_ceil(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Ceil)
+    instructions.push(Instruction::F32Ceil);
+    Ok(())
 }
 
-fn f32_floor(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_floor(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Floor)
+    instructions.push(Instruction::F32Floor);
+    Ok(())
 }
 
-fn f32_trunc(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_trunc(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Trunc)
+    instructions.push(Instruction::F32Trunc);
+    Ok(())
 }
 
-fn f32_nearest(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_nearest(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Nearest)
+    instructions.push(Instruction::F32Nearest);
+    Ok(())
 }
 
-fn f32_sqrt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_sqrt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Sqrt)
+    instructions.push(Instruction::F32Sqrt);
+    Ok(())
 }
 
-fn f32_add(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_add(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Add)
+    instructions.push(Instruction::F32Add);
+    Ok(())
 }
 
-fn f32_sub(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_sub(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Sub)
+    instructions.push(Instruction::F32Sub);
+    Ok(())
 }
 
-fn f32_mul(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_mul(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Mul)
+    instructions.push(Instruction::F32Mul);
+    Ok(())
 }
 
-fn f32_div(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_div(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Div)
+    instructions.push(Instruction::F32Div);
+    Ok(())
 }
 
-fn f32_min(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_min(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Min)
+    instructions.push(Instruction::F32Min);
+    Ok(())
 }
 
-fn f32_max(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f32_max(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Max)
+    instructions.push(Instruction::F32Max);
+    Ok(())
 }
 
 fn f32_copysign(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32, ValType::F32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32Copysign)
+    instructions.push(Instruction::F32Copysign);
+    Ok(())
 }
 
 #[inline]
@@ -2711,102 +3911,184 @@ fn f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.float_enabled() && builder.types_on_stack(&[ValType::F64])
 }
 
-fn f64_abs(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_abs(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Abs)
+    instructions.push(Instruction::F64Abs);
+    Ok(())
 }
 
-fn f64_neg(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_neg(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Neg)
+    instructions.push(Instruction::F64Neg);
+    Ok(())
 }
 
-fn f64_ceil(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_ceil(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Ceil)
+    instructions.push(Instruction::F64Ceil);
+    Ok(())
 }
 
-fn f64_floor(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_floor(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Floor)
+    instructions.push(Instruction::F64Floor);
+    Ok(())
 }
 
-fn f64_trunc(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_trunc(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Trunc)
+    instructions.push(Instruction::F64Trunc);
+    Ok(())
 }
 
-fn f64_nearest(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_nearest(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Nearest)
+    instructions.push(Instruction::F64Nearest);
+    Ok(())
 }
 
-fn f64_sqrt(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_sqrt(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Sqrt)
+    instructions.push(Instruction::F64Sqrt);
+    Ok(())
 }
 
-fn f64_add(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_add(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Add)
+    instructions.push(Instruction::F64Add);
+    Ok(())
 }
 
-fn f64_sub(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_sub(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Sub)
+    instructions.push(Instruction::F64Sub);
+    Ok(())
 }
 
-fn f64_mul(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_mul(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Mul)
+    instructions.push(Instruction::F64Mul);
+    Ok(())
 }
 
-fn f64_div(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_div(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Div)
+    instructions.push(Instruction::F64Div);
+    Ok(())
 }
 
-fn f64_min(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_min(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Min)
+    instructions.push(Instruction::F64Min);
+    Ok(())
 }
 
-fn f64_max(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn f64_max(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Max)
+    instructions.push(Instruction::F64Max);
+    Ok(())
 }
 
 fn f64_copysign(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64, ValType::F64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64Copysign)
+    instructions.push(Instruction::F64Copysign);
+    Ok(())
 }
 
 fn i32_wrap_i64(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32WrapI64)
+    instructions.push(Instruction::I32WrapI64);
+    Ok(())
 }
 
 fn nontrapping_f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
@@ -2817,22 +4099,34 @@ fn nontrapping_f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool 
 
 fn i32_trunc_f32_s(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncF32S)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I32TruncF32S, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32TruncF32S);
+    }
+    Ok(())
 }
 
 fn i32_trunc_f32_u(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncF32U)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I32TruncF32U, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32TruncF32U);
+    }
+    Ok(())
 }
 
 fn nontrapping_f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
@@ -2843,222 +4137,290 @@ fn nontrapping_f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool 
 
 fn i32_trunc_f64_s(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncF64S)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I32TruncF64S, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32TruncF64S);
+    }
+    Ok(())
 }
 
 fn i32_trunc_f64_u(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncF64U)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I32TruncF64U, builder, instructions);
+    } else {
+        instructions.push(Instruction::I32TruncF64U);
+    }
+    Ok(())
 }
 
 fn i64_extend_i32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64ExtendI32S)
+    instructions.push(Instruction::I64ExtendI32S);
+    Ok(())
 }
 
 fn i64_extend_i32_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64ExtendI32U)
+    instructions.push(Instruction::I64ExtendI32U);
+    Ok(())
 }
 
 fn i64_trunc_f32_s(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncF32S)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I64TruncF32S, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64TruncF32S);
+    }
+    Ok(())
 }
 
 fn i64_trunc_f32_u(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncF32U)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I64TruncF32U, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64TruncF32U);
+    }
+    Ok(())
 }
 
 fn i64_trunc_f64_s(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncF64S)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I64TruncF64S, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64TruncF64S);
+    }
+    Ok(())
 }
 
 fn i64_trunc_f64_u(
     _: &mut Unstructured,
-    _: &Module,
+    module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncF64U)
+    if module.config.disallow_traps() {
+        no_traps::trunc(Instruction::I64TruncF64U, builder, instructions);
+    } else {
+        instructions.push(Instruction::I64TruncF64U);
+    }
+    Ok(())
 }
 
 fn f32_convert_i32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32ConvertI32S)
+    instructions.push(Instruction::F32ConvertI32S);
+    Ok(())
 }
 
 fn f32_convert_i32_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32ConvertI32U)
+    instructions.push(Instruction::F32ConvertI32U);
+    Ok(())
 }
 
 fn f32_convert_i64_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32ConvertI64S)
+    instructions.push(Instruction::F32ConvertI64S);
+    Ok(())
 }
 
 fn f32_convert_i64_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32ConvertI64U)
+    instructions.push(Instruction::F32ConvertI64U);
+    Ok(())
 }
 
 fn f32_demote_f64(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32DemoteF64)
+    instructions.push(Instruction::F32DemoteF64);
+    Ok(())
 }
 
 fn f64_convert_i32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64ConvertI32S)
+    instructions.push(Instruction::F64ConvertI32S);
+    Ok(())
 }
 
 fn f64_convert_i32_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64ConvertI32U)
+    instructions.push(Instruction::F64ConvertI32U);
+    Ok(())
 }
 
 fn f64_convert_i64_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64ConvertI64S)
+    instructions.push(Instruction::F64ConvertI64S);
+    Ok(())
 }
 
 fn f64_convert_i64_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64ConvertI64U)
+    instructions.push(Instruction::F64ConvertI64U);
+    Ok(())
 }
 
 fn f64_promote_f32(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64PromoteF32)
+    instructions.push(Instruction::F64PromoteF32);
+    Ok(())
 }
 
 fn i32_reinterpret_f32(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32ReinterpretF32)
+    instructions.push(Instruction::I32ReinterpretF32);
+    Ok(())
 }
 
 fn i64_reinterpret_f64(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64ReinterpretF64)
+    instructions.push(Instruction::I64ReinterpretF64);
+    Ok(())
 }
 
 fn f32_reinterpret_i32(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::F32]);
-    Ok(Instruction::F32ReinterpretI32)
+    instructions.push(Instruction::F32ReinterpretI32);
+    Ok(())
 }
 
 fn f64_reinterpret_i64(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::F64]);
-    Ok(Instruction::F64ReinterpretI64)
+    instructions.push(Instruction::F64ReinterpretI64);
+    Ok(())
 }
 
 fn extendable_i32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
@@ -3069,20 +4431,24 @@ fn i32_extend_8_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Extend8S)
+    instructions.push(Instruction::I32Extend8S);
+    Ok(())
 }
 
 fn i32_extend_16_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32Extend16S)
+    instructions.push(Instruction::I32Extend16S);
+    Ok(())
 }
 
 fn extendable_i64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
@@ -3093,110 +4459,132 @@ fn i64_extend_8_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Extend8S)
+    instructions.push(Instruction::I64Extend8S);
+    Ok(())
 }
 
 fn i64_extend_16_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Extend16S)
+    instructions.push(Instruction::I64Extend16S);
+    Ok(())
 }
 
 fn i64_extend_32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64Extend32S)
+    instructions.push(Instruction::I64Extend32S);
+    Ok(())
 }
 
 fn i32_trunc_sat_f32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncSatF32S)
+    instructions.push(Instruction::I32TruncSatF32S);
+    Ok(())
 }
 
 fn i32_trunc_sat_f32_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncSatF32U)
+    instructions.push(Instruction::I32TruncSatF32U);
+    Ok(())
 }
 
 fn i32_trunc_sat_f64_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncSatF64S)
+    instructions.push(Instruction::I32TruncSatF64S);
+    Ok(())
 }
 
 fn i32_trunc_sat_f64_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::I32TruncSatF64U)
+    instructions.push(Instruction::I32TruncSatF64U);
+    Ok(())
 }
 
 fn i64_trunc_sat_f32_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncSatF32S)
+    instructions.push(Instruction::I64TruncSatF32S);
+    Ok(())
 }
 
 fn i64_trunc_sat_f32_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F32]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncSatF32U)
+    instructions.push(Instruction::I64TruncSatF32U);
+    Ok(())
 }
 
 fn i64_trunc_sat_f64_s(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncSatF64S)
+    instructions.push(Instruction::I64TruncSatF64S);
+    Ok(())
 }
 
 fn i64_trunc_sat_f64_u(
     _: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::F64]);
     builder.push_operands(&[ValType::I64]);
-    Ok(Instruction::I64TruncSatF64U)
+    instructions.push(Instruction::I64TruncSatF64U);
+    Ok(())
 }
 
 fn memory_offset(u: &mut Unstructured, module: &Module, memory_index: u32) -> Result<u64> {
@@ -3209,17 +4597,34 @@ fn memory_offset(u: &mut Unstructured, module: &Module, memory_index: u32) -> Re
         .maximum
         .map(|max| max.saturating_mul(65536))
         .unwrap_or(u64::MAX);
-    let (min, max, true_max) = if memory_type.memory64 {
-        // 64-bit memories can use the limits calculated above as-is
-        (min, max, u64::MAX)
-    } else {
-        // 32-bit memories can't represent a full 4gb offset, so if that's the
-        // min/max sizes then we need to switch the m to `u32::MAX`.
-        (
-            u64::from(u32::try_from(min).unwrap_or(u32::MAX)),
-            u64::from(u32::try_from(max).unwrap_or(u32::MAX)),
-            u64::from(u32::MAX),
-        )
+
+    let (min, max, true_max) = match (memory_type.memory64, module.config.disallow_traps()) {
+        (true, false) => {
+            // 64-bit memories can use the limits calculated above as-is
+            (min, max, u64::MAX)
+        }
+        (false, false) => {
+            // 32-bit memories can't represent a full 4gb offset, so if that's the
+            // min/max sizes then we need to switch the m to `u32::MAX`.
+            (
+                u64::from(u32::try_from(min).unwrap_or(u32::MAX)),
+                u64::from(u32::try_from(max).unwrap_or(u32::MAX)),
+                u64::from(u32::MAX),
+            )
+        }
+        // The logic for non-trapping versions of load/store involves pushing
+        // the offset + load/store size onto the stack as either an i32 or i64
+        // value. So even though offsets can normally be as high as u32 or u64,
+        // we need to limit them to lower in order for our non-trapping logic to
+        // work. 16 is the number of bytes of the largest load type (V128).
+        (true, true) => {
+            let no_trap_max = (i64::MAX - 16) as u64;
+            (min.min(no_trap_max), no_trap_max, no_trap_max)
+        }
+        (false, true) => {
+            let no_trap_max = (i32::MAX - 16) as u64;
+            (min.min(no_trap_max), no_trap_max, no_trap_max)
+        }
     };
 
     let choice = u.int_in_range(0..=a + b + c - 1)?;
@@ -3277,10 +4682,16 @@ fn ref_null_valid(module: &Module, _: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
 }
 
-fn ref_null(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
-    let ty = *u.choose(&[ValType::ExternRef, ValType::FuncRef])?;
-    builder.push_operands(&[ty]);
-    Ok(Instruction::RefNull(ty))
+fn ref_null(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
+    let ty = *u.choose(&[RefType::EXTERNREF, RefType::FUNCREF])?;
+    builder.push_operands(&[ty.into()]);
+    instructions.push(Instruction::RefNull(ty.heap_type));
+    Ok(())
 }
 
 #[inline]
@@ -3288,31 +4699,44 @@ fn ref_func_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled() && builder.allocs.referenced_functions.len() > 0
 }
 
-fn ref_func(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn ref_func(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let i = *u.choose(&builder.allocs.referenced_functions)?;
-    builder.push_operands(&[ValType::FuncRef]);
-    Ok(Instruction::RefFunc(i))
+    builder.push_operands(&[ValType::FUNCREF]);
+    instructions.push(Instruction::RefFunc(i));
+    Ok(())
 }
 
 #[inline]
 fn ref_is_null_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
-        && (builder.type_on_stack(ValType::ExternRef) || builder.type_on_stack(ValType::FuncRef))
+        && (builder.type_on_stack(ValType::EXTERNREF) || builder.type_on_stack(ValType::FUNCREF))
 }
 
-fn ref_is_null(_: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn ref_is_null(
+    _: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     pop_reference_type(builder);
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::RefIsNull)
+    instructions.push(Instruction::RefIsNull);
+    Ok(())
 }
 
 #[inline]
 fn table_fill_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
         && module.config.bulk_memory_enabled()
-        && [ValType::ExternRef, ValType::FuncRef].iter().any(|ty| {
+        && !module.config.disallow_traps() // Non-trapping table fill generation not yet implemented
+        && [ValType::EXTERNREF, ValType::FUNCREF].iter().any(|ty| {
             builder.types_on_stack(&[ValType::I32, *ty, ValType::I32])
-                && module.tables.iter().any(|t| t.element_type == *ty)
+                && module.tables.iter().any(|t| *ty == t.element_type.into())
         })
 }
 
@@ -3320,20 +4744,23 @@ fn table_fill(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let ty = pop_reference_type(builder);
     builder.pop_operands(&[ValType::I32]);
     let table = table_index(ty, u, module)?;
-    Ok(Instruction::TableFill { table })
+    instructions.push(Instruction::TableFill(table));
+    Ok(())
 }
 
 #[inline]
 fn table_set_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
-        && [ValType::ExternRef, ValType::FuncRef].iter().any(|ty| {
+    && !module.config.disallow_traps() // Non-trapping table.set generation not yet implemented
+        && [ValType::EXTERNREF, ValType::FUNCREF].iter().any(|ty| {
             builder.types_on_stack(&[ValType::I32, *ty])
-                && module.tables.iter().any(|t| t.element_type == *ty)
+                && module.tables.iter().any(|t| *ty == t.element_type.into())
         })
 }
 
@@ -3341,16 +4768,19 @@ fn table_set(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let ty = pop_reference_type(builder);
     builder.pop_operands(&[ValType::I32]);
     let table = table_index(ty, u, module)?;
-    Ok(Instruction::TableSet { table })
+    instructions.push(Instruction::TableSet(table));
+    Ok(())
 }
 
 #[inline]
 fn table_get_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
+    && !module.config.disallow_traps() // Non-trapping table.get generation not yet implemented
         && builder.type_on_stack(ValType::I32)
         && module.tables.len() > 0
 }
@@ -3359,12 +4789,14 @@ fn table_get(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let idx = u.int_in_range(0..=module.tables.len() - 1)?;
     let ty = module.tables[idx].element_type;
-    builder.push_operands(&[ty]);
-    Ok(Instruction::TableGet { table: idx as u32 })
+    builder.push_operands(&[ty.into()]);
+    instructions.push(Instruction::TableGet(idx as u32));
+    Ok(())
 }
 
 #[inline]
@@ -3376,18 +4808,20 @@ fn table_size(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let table = u.int_in_range(0..=module.tables.len() - 1)? as u32;
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::TableSize { table })
+    instructions.push(Instruction::TableSize(table));
+    Ok(())
 }
 
 #[inline]
 fn table_grow_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
-        && [ValType::ExternRef, ValType::FuncRef].iter().any(|ty| {
+        && [ValType::EXTERNREF, ValType::FUNCREF].iter().any(|ty| {
             builder.types_on_stack(&[*ty, ValType::I32])
-                && module.tables.iter().any(|t| t.element_type == *ty)
+                && module.tables.iter().any(|t| *ty == t.element_type.into())
         })
 }
 
@@ -3395,17 +4829,20 @@ fn table_grow(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32]);
     let ty = pop_reference_type(builder);
     let table = table_index(ty, u, module)?;
     builder.push_operands(&[ValType::I32]);
-    Ok(Instruction::TableGrow { table })
+    instructions.push(Instruction::TableGrow(table));
+    Ok(())
 }
 
 #[inline]
 fn table_copy_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
+    && !module.config.disallow_traps() // Non-trapping table.copy generation not yet implemented
         && module.tables.len() > 0
         && builder.types_on_stack(&[ValType::I32, ValType::I32, ValType::I32])
 }
@@ -3414,16 +4851,22 @@ fn table_copy(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32, ValType::I32]);
-    let src = u.int_in_range(0..=module.tables.len() - 1)? as u32;
-    let dst = table_index(module.tables[src as usize].element_type, u, module)?;
-    Ok(Instruction::TableCopy { src, dst })
+    let src_table = u.int_in_range(0..=module.tables.len() - 1)? as u32;
+    let dst_table = table_index(module.tables[src_table as usize].element_type, u, module)?;
+    instructions.push(Instruction::TableCopy {
+        src_table,
+        dst_table,
+    });
+    Ok(())
 }
 
 #[inline]
 fn table_init_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.reference_types_enabled()
+    && !module.config.disallow_traps() // Non-trapping table.init generation not yet implemented.
         && builder.allocs.table_init_possible
         && builder.types_on_stack(&[ValType::I32, ValType::I32, ValType::I32])
 }
@@ -3432,7 +4875,8 @@ fn table_init(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::I32, ValType::I32, ValType::I32]);
     let segments = module
         .elems
@@ -3443,10 +4887,11 @@ fn table_init(
         .collect::<Vec<_>>();
     let segment = *u.choose(&segments)?;
     let table = table_index(module.elems[segment].ty, u, module)?;
-    Ok(Instruction::TableInit {
-        segment: segment as u32,
+    instructions.push(Instruction::TableInit {
+        elem_index: segment as u32,
         table,
-    })
+    });
+    Ok(())
 }
 
 #[inline]
@@ -3458,22 +4903,24 @@ fn elem_drop(
     u: &mut Unstructured,
     module: &Module,
     _builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     let segment = u.int_in_range(0..=module.elems.len() - 1)? as u32;
-    Ok(Instruction::ElemDrop { segment })
+    instructions.push(Instruction::ElemDrop(segment));
+    Ok(())
 }
 
-fn pop_reference_type(builder: &mut CodeBuilder) -> ValType {
-    if builder.type_on_stack(ValType::ExternRef) {
-        builder.pop_operands(&[ValType::ExternRef]);
-        ValType::ExternRef
+fn pop_reference_type(builder: &mut CodeBuilder) -> RefType {
+    if builder.type_on_stack(ValType::EXTERNREF) {
+        builder.pop_operands(&[ValType::EXTERNREF]);
+        RefType::EXTERNREF
     } else {
-        builder.pop_operands(&[ValType::FuncRef]);
-        ValType::FuncRef
+        builder.pop_operands(&[ValType::FUNCREF]);
+        RefType::FUNCREF
     }
 }
 
-fn table_index(ty: ValType, u: &mut Unstructured, module: &Module) -> Result<u32> {
+fn table_index(ty: RefType, u: &mut Unstructured, module: &Module) -> Result<u32> {
     let tables = module
         .tables
         .iter()
@@ -3490,89 +4937,133 @@ fn lane_index(u: &mut Unstructured, number_of_lanes: u8) -> Result<u8> {
 
 #[inline]
 fn simd_v128_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128])
 }
 
 #[inline]
 fn simd_v128_on_stack_relaxed(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.relaxed_simd_enabled() && builder.types_on_stack(&[ValType::V128])
+    !module.config.disallow_traps()
+        && module.config.relaxed_simd_enabled()
+        && builder.types_on_stack(&[ValType::V128])
 }
 
 #[inline]
 fn simd_v128_v128_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::V128])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::V128])
 }
 
 #[inline]
 fn simd_v128_v128_on_stack_relaxed(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.relaxed_simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::V128])
+    !module.config.disallow_traps()
+        && module.config.relaxed_simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::V128])
 }
 
 #[inline]
 fn simd_v128_v128_v128_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled()
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
         && builder.types_on_stack(&[ValType::V128, ValType::V128, ValType::V128])
 }
 
 #[inline]
 fn simd_v128_v128_v128_on_stack_relaxed(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.relaxed_simd_enabled()
+    !module.config.disallow_traps()
+        && module.config.relaxed_simd_enabled()
         && builder.types_on_stack(&[ValType::V128, ValType::V128, ValType::V128])
 }
 
 #[inline]
 fn simd_v128_i32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::I32])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::I32])
 }
 
 #[inline]
 fn simd_v128_i64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::I64])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::I64])
 }
 
 #[inline]
 fn simd_v128_f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::F32])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::F32])
 }
 
 #[inline]
 fn simd_v128_f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.types_on_stack(&[ValType::V128, ValType::F64])
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.types_on_stack(&[ValType::V128, ValType::F64])
 }
 
 #[inline]
 fn simd_i32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.type_on_stack(ValType::I32)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.type_on_stack(ValType::I32)
 }
 
 #[inline]
 fn simd_i64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.type_on_stack(ValType::I64)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.type_on_stack(ValType::I64)
 }
 
 #[inline]
 fn simd_f32_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.type_on_stack(ValType::F32)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.type_on_stack(ValType::F32)
 }
 
 #[inline]
 fn simd_f64_on_stack(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && builder.type_on_stack(ValType::F64)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && builder.type_on_stack(ValType::F64)
 }
 
 #[inline]
 fn simd_have_memory_and_offset(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && have_memory_and_offset(module, builder)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && have_memory_and_offset(module, builder)
 }
 
 #[inline]
 fn simd_have_memory_and_offset_and_v128(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && store_valid(module, builder, || ValType::V128)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && store_valid(module, builder, || ValType::V128)
+}
+
+#[inline]
+fn simd_load_lane_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
+    // The SIMD non-trapping case is not yet implemented.
+    !module.config.disallow_traps() && simd_have_memory_and_offset_and_v128(module, builder)
 }
 
 #[inline]
 fn simd_v128_store_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
-    module.config.simd_enabled() && store_valid(module, builder, || ValType::V128)
+    !module.config.disallow_traps()
+        && module.config.simd_enabled()
+        && store_valid(module, builder, || ValType::V128)
+}
+
+#[inline]
+fn simd_store_lane_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
+    // The SIMD non-trapping case is not yet implemented.
+    !module.config.disallow_traps() && simd_v128_store_valid(module, builder)
 }
 
 #[inline]
@@ -3586,10 +5077,22 @@ macro_rules! simd_load {
             u: &mut Unstructured,
             module: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             let memarg = mem_arg(u, module, builder, $alignments)?;
             builder.push_operands(&[ValType::V128]);
-            Ok(Instruction::$instruction { memarg })
+            if module.config.disallow_traps() {
+                no_traps::load(
+                    Instruction::$instruction(memarg),
+                    module,
+                    builder,
+                    instructions,
+                );
+            } else {
+                instructions.push(Instruction::$instruction(memarg));
+            }
+            Ok(())
         }
     };
 }
@@ -3612,10 +5115,21 @@ fn v128_store(
     u: &mut Unstructured,
     module: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::V128]);
     let memarg = mem_arg(u, module, builder, &[0, 1, 2, 3, 4])?;
-    Ok(Instruction::V128Store { memarg })
+    if module.config.disallow_traps() {
+        no_traps::store(
+            Instruction::V128Store(memarg),
+            module,
+            builder,
+            instructions,
+        );
+    } else {
+        instructions.push(Instruction::V128Store(memarg));
+    }
+    Ok(())
 }
 
 macro_rules! simd_load_lane {
@@ -3624,14 +5138,16 @@ macro_rules! simd_load_lane {
             u: &mut Unstructured,
             module: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands(&[ValType::V128]);
             let memarg = mem_arg(u, module, builder, $alignments)?;
             builder.push_operands(&[ValType::V128]);
-            Ok(Instruction::$instruction {
+            instructions.push(Instruction::$instruction {
                 memarg,
                 lane: lane_index(u, $number_of_lanes)?,
-            })
+            });
+            Ok(())
         }
     };
 }
@@ -3647,13 +5163,15 @@ macro_rules! simd_store_lane {
             u: &mut Unstructured,
             module: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands(&[ValType::V128]);
             let memarg = mem_arg(u, module, builder, $alignments)?;
-            Ok(Instruction::$instruction {
+            instructions.push(Instruction::$instruction {
                 memarg,
                 lane: lane_index(u, $number_of_lanes)?,
-            })
+            });
+            Ok(())
         }
     };
 }
@@ -3663,24 +5181,32 @@ simd_store_lane!(V128Store16Lane, v128_store16_lane, &[0, 1], 8);
 simd_store_lane!(V128Store32Lane, v128_store32_lane, &[0, 1, 2], 4);
 simd_store_lane!(V128Store64Lane, v128_store64_lane, &[0, 1, 2, 3], 2);
 
-fn v128_const(u: &mut Unstructured, _: &Module, builder: &mut CodeBuilder) -> Result<Instruction> {
+fn v128_const(
+    u: &mut Unstructured,
+    _: &Module,
+    builder: &mut CodeBuilder,
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.push_operands(&[ValType::V128]);
     let c = i128::from_le_bytes(u.arbitrary()?);
-    Ok(Instruction::V128Const(c))
+    instructions.push(Instruction::V128Const(c));
+    Ok(())
 }
 
 fn i8x16_shuffle(
     u: &mut Unstructured,
     _: &Module,
     builder: &mut CodeBuilder,
-) -> Result<Instruction> {
+    instructions: &mut Vec<Instruction>,
+) -> Result<()> {
     builder.pop_operands(&[ValType::V128, ValType::V128]);
     builder.push_operands(&[ValType::V128]);
     let mut lanes = [0; 16];
     for i in 0..16 {
         lanes[i] = u.int_in_range(0..=31)?;
     }
-    Ok(Instruction::I8x16Shuffle { lanes })
+    instructions.push(Instruction::I8x16Shuffle(lanes));
+    Ok(())
 }
 
 macro_rules! simd_lane_access {
@@ -3689,12 +5215,12 @@ macro_rules! simd_lane_access {
             u: &mut Unstructured,
             _: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands($in_types);
             builder.push_operands($out_types);
-            Ok(Instruction::$instruction {
-                lane: lane_index(u, $number_of_lanes)?,
-            })
+            instructions.push(Instruction::$instruction(lane_index(u, $number_of_lanes)?));
+            Ok(())
         }
     };
 }
@@ -3720,10 +5246,13 @@ macro_rules! simd_binop {
             _: &mut Unstructured,
             _: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands(&[ValType::V128, ValType::V128]);
             builder.push_operands(&[ValType::V128]);
-            Ok(Instruction::$instruction)
+            instructions.push(Instruction::$instruction);
+            Ok(())
         }
     };
 }
@@ -3738,10 +5267,12 @@ macro_rules! simd_unop {
             _: &mut Unstructured,
             _: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+
+       instructions: &mut Vec<Instruction>, ) -> Result<()> {
             builder.pop_operands(&[ValType::$in_type]);
             builder.push_operands(&[ValType::$out_type]);
-            Ok(Instruction::$instruction)
+            instructions.push(Instruction::$instruction);
+            Ok(())
         }
     };
 }
@@ -3752,10 +5283,13 @@ macro_rules! simd_ternop {
             _: &mut Unstructured,
             _: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands(&[ValType::V128, ValType::V128, ValType::V128]);
             builder.push_operands(&[ValType::V128]);
-            Ok(Instruction::$instruction)
+            instructions.push(Instruction::$instruction);
+            Ok(())
         }
     };
 }
@@ -3766,10 +5300,13 @@ macro_rules! simd_shift {
             _: &mut Unstructured,
             _: &Module,
             builder: &mut CodeBuilder,
-        ) -> Result<Instruction> {
+
+            instructions: &mut Vec<Instruction>,
+        ) -> Result<()> {
             builder.pop_operands(&[ValType::V128, ValType::I32]);
             builder.push_operands(&[ValType::V128]);
-            Ok(Instruction::$instruction)
+            instructions.push(Instruction::$instruction);
+            Ok(())
         }
     };
 }
@@ -3855,7 +5392,7 @@ simd_binop!(I8x16MinS, i8x16_min_s);
 simd_binop!(I8x16MinU, i8x16_min_u);
 simd_binop!(I8x16MaxS, i8x16_max_s);
 simd_binop!(I8x16MaxU, i8x16_max_u);
-simd_binop!(I8x16RoundingAverageU, i8x16_rounding_average_u);
+simd_binop!(I8x16AvgrU, i8x16_avgr_u);
 simd_unop!(I16x8ExtAddPairwiseI8x16S, i16x8_extadd_pairwise_i8x16s);
 simd_unop!(I16x8ExtAddPairwiseI8x16U, i16x8_extadd_pairwise_i8x16u);
 simd_unop!(I16x8Abs, i16x8_abs);
@@ -3883,7 +5420,7 @@ simd_binop!(I16x8MinS, i16x8_min_s);
 simd_binop!(I16x8MinU, i16x8_min_u);
 simd_binop!(I16x8MaxS, i16x8_max_s);
 simd_binop!(I16x8MaxU, i16x8_max_u);
-simd_binop!(I16x8RoundingAverageU, i16x8_rounding_average_u);
+simd_binop!(I16x8AvgrU, i16x8_avgr_u);
 simd_binop!(I16x8ExtMulLowI8x16S, i16x8_extmul_low_i8x16s);
 simd_binop!(I16x8ExtMulHighI8x16S, i16x8_extmul_high_i8x16s);
 simd_binop!(I16x8ExtMulLowI8x16U, i16x8_extmul_low_i8x16u);
@@ -3973,25 +5510,25 @@ simd_unop!(F32x4DemoteF64x2Zero, f32x4_demote_f64x2_zero);
 simd_unop!(F64x2PromoteLowF32x4, f64x2_promote_low_f32x4);
 simd_ternop!(V128Bitselect, v128_bitselect);
 simd_binop!(I8x16RelaxedSwizzle, i8x16_relaxed_swizzle);
-simd_unop!(I32x4RelaxedTruncSatF32x4S, i32x4_relaxed_trunc_sat_f32x4s);
-simd_unop!(I32x4RelaxedTruncSatF32x4U, i32x4_relaxed_trunc_sat_f32x4u);
-simd_unop!(
-    I32x4RelaxedTruncSatF64x2SZero,
-    i32x4_relaxed_trunc_sat_f64x2s_zero
-);
-simd_unop!(
-    I32x4RelaxedTruncSatF64x2UZero,
-    i32x4_relaxed_trunc_sat_f64x2u_zero
-);
-simd_ternop!(F32x4Fma, f32x4_fma);
-simd_ternop!(F32x4Fms, f32x4_fms);
-simd_ternop!(F64x2Fma, f64x2_fma);
-simd_ternop!(F64x2Fms, f64x2_fms);
-simd_ternop!(I8x16LaneSelect, i8x16_laneselect);
-simd_ternop!(I16x8LaneSelect, i16x8_laneselect);
-simd_ternop!(I32x4LaneSelect, i32x4_laneselect);
-simd_ternop!(I64x2LaneSelect, i64x2_laneselect);
+simd_unop!(I32x4RelaxedTruncF32x4S, i32x4_relaxed_trunc_f32x4s);
+simd_unop!(I32x4RelaxedTruncF32x4U, i32x4_relaxed_trunc_f32x4u);
+simd_unop!(I32x4RelaxedTruncF64x2SZero, i32x4_relaxed_trunc_f64x2s_zero);
+simd_unop!(I32x4RelaxedTruncF64x2UZero, i32x4_relaxed_trunc_f64x2u_zero);
+simd_ternop!(F32x4RelaxedMadd, f32x4_relaxed_madd);
+simd_ternop!(F32x4RelaxedNmadd, f32x4_relaxed_nmadd);
+simd_ternop!(F64x2RelaxedMadd, f64x2_relaxed_madd);
+simd_ternop!(F64x2RelaxedNmadd, f64x2_relaxed_nmadd);
+simd_ternop!(I8x16RelaxedLaneselect, i8x16_relaxed_laneselect);
+simd_ternop!(I16x8RelaxedLaneselect, i16x8_relaxed_laneselect);
+simd_ternop!(I32x4RelaxedLaneselect, i32x4_relaxed_laneselect);
+simd_ternop!(I64x2RelaxedLaneselect, i64x2_relaxed_laneselect);
 simd_binop!(F32x4RelaxedMin, f32x4_relaxed_min);
 simd_binop!(F32x4RelaxedMax, f32x4_relaxed_max);
 simd_binop!(F64x2RelaxedMin, f64x2_relaxed_min);
 simd_binop!(F64x2RelaxedMax, f64x2_relaxed_max);
+simd_binop!(I16x8RelaxedQ15mulrS, i16x8_relaxed_q15mulr_s);
+simd_binop!(I16x8RelaxedDotI8x16I7x16S, i16x8_relaxed_dot_i8x16_i7x16_s);
+simd_ternop!(
+    I32x4RelaxedDotI8x16I7x16AddS,
+    i32x4_relaxed_dot_i8x16_i7x16_add_s
+);

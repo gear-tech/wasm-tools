@@ -19,23 +19,35 @@
   "index out of bounds")
 
 (component
-  (import "1" (instance $i))
-  (import "2" (core module $m))
-  (import "3" (component $c))
-  (import "4" (value $v string))
-  (import "5" (func $f))
+  (import "a" (instance $i))
+  (import "b" (core module $m))
+  (import "c" (component $c))
+  (import "d" (value $v string))
+  (import "e" (func $f))
 
-  (export "1" (instance $i))
-  (export "2" (core module $m))
-  (export "3" (component $c))
-  (export "4" (value $v))
-  (export "5" (func $f))
+  (export "f" (instance $i))
+  (export "g" (core module $m))
+  (export "h" (component $c))
+  (export "i" (value $v))
+  (export "j" (func $f))
 )
 
 (assert_invalid
   (component
-    (import "" (value $v string))
-    (export "1" (value $v))
-    (export "2" (value $v))
+    (import "a" (value $v string))
+    (export "b" (value $v))
+    (export "c" (value $v))
   )
   "cannot be used more than once")
+
+
+(component
+  (import "a" (func))
+  (export (interface "wasi:http/types@2.0.0") (func 0))
+)
+
+;; import/exports can overlap on ids
+(component
+  (import (interface "wasi:http/types@2.0.0") (func))
+  (export (interface "wasi:http/types@2.0.0") (func 0))
+)

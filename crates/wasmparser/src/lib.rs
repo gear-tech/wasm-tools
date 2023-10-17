@@ -22,6 +22,9 @@
 //! If you need random access to the entire WebAssembly data-structure,
 //! this is not the right library for you. You could however, build such
 //! a data-structure using this library.
+//!
+//! To get started, create a [`Parser`] using [`Parser::new`] and then follow
+//! the examples documented for [`Parser::parse`] or [`Parser::parse_all`].
 
 #![deny(missing_docs)]
 
@@ -41,14 +44,15 @@
 ///
 /// - `@mvp`: Denoting a Wasm operator from the initial Wasm MVP version.
 /// - `@exceptions`: [Wasm `expection-handling` proposal]
-/// - `@tail_calls`: [Wasm `tail-calls` proposal]
+/// - `@tail_call`: [Wasm `tail-calls` proposal]
 /// - `@reference_types`: [Wasm `reference-types` proposal]
-/// - `@sign_ext_ops`: [Wasm `sign-extension-ops` proposal]
-/// - `@non_trapping_f2i_conversions`: [Wasm `non_trapping_float-to-int-conversions` proposal]
+/// - `@sign_extension`: [Wasm `sign-extension-ops` proposal]
+/// - `@saturating_float_to_int`: [Wasm `non_trapping_float-to-int-conversions` proposal]
 /// - `@bulk_memory `:[Wasm `bulk-memory` proposal]
 /// - `@threads`: [Wasm `threads` proposal]
 /// - `@simd`: [Wasm `simd` proposal]
 /// - `@relaxed_simd`: [Wasm `relaxed-simd` proposal]
+/// - `@gc`: [Wasm `gc` proposal]
 ///
 /// [Wasm `expection-handling` proposal]:
 /// https://github.com/WebAssembly/exception-handling
@@ -77,6 +81,9 @@
 /// [Wasm `relaxed-simd` proposal]:
 /// https://github.com/WebAssembly/relaxed-simd
 ///
+/// [Wasm `gc` proposal]:
+/// https://github.com/WebAssembly/gc
+///
 /// ```
 /// macro_rules! define_visit_operator {
 ///     // The outer layer of repetition represents how all operators are
@@ -97,7 +104,7 @@
 ///     // `VisitOperator` trait that this corresponds to.
 ///     ($( @$proposal:ident $op:ident $({ $($arg:ident: $argty:ty),* })? => $visit:ident)*) => {
 ///         $(
-///             fn $visit(&mut self, _offset: usize $($(,$arg: $argty)*)?) {
+///             fn $visit(&mut self $($(,$arg: $argty)*)?) {
 ///                 // do nothing for this example
 ///             }
 ///         )*
@@ -118,25 +125,25 @@ macro_rules! for_each_operator {
         $mac! {
             @mvp Unreachable => visit_unreachable
             @mvp Nop => visit_nop
-            @mvp Block { ty: $crate::BlockType } => visit_block
-            @mvp Loop { ty: $crate::BlockType } => visit_loop
-            @mvp If { ty: $crate::BlockType } => visit_if
+            @mvp Block { blockty: $crate::BlockType } => visit_block
+            @mvp Loop { blockty: $crate::BlockType } => visit_loop
+            @mvp If { blockty: $crate::BlockType } => visit_if
             @mvp Else => visit_else
-            @expections Try { ty: $crate::BlockType } => visit_try
-            @expections Catch { index: u32 } => visit_catch
-            @expections Throw { index: u32 } => visit_throw
-            @expections Rethrow { relative_depth: u32 } => visit_rethrow
+            @exceptions Try { blockty: $crate::BlockType } => visit_try
+            @exceptions Catch { tag_index: u32 } => visit_catch
+            @exceptions Throw { tag_index: u32 } => visit_throw
+            @exceptions Rethrow { relative_depth: u32 } => visit_rethrow
             @mvp End => visit_end
             @mvp Br { relative_depth: u32 } => visit_br
             @mvp BrIf { relative_depth: u32 } => visit_br_if
-            @mvp BrTable { table: $crate::BrTable<'a> } => visit_br_table
+            @mvp BrTable { targets: $crate::BrTable<'a> } => visit_br_table
             @mvp Return => visit_return
             @mvp Call { function_index: u32 } => visit_call
-            @mvp CallIndirect { index: u32, table_index: u32, table_byte: u8 } => visit_call_indirect
-            @tail_calls ReturnCall { function_index: u32 } => visit_return_call
-            @tail_calls ReturnCallIndirect { index: u32, table_index: u32 } => visit_return_call_indirect
-            @expections Delegate { relative_depth: u32 } => visit_delegate
-            @expections CatchAll => visit_catch_all
+            @mvp CallIndirect { type_index: u32, table_index: u32, table_byte: u8 } => visit_call_indirect
+            @tail_call ReturnCall { function_index: u32 } => visit_return_call
+            @tail_call ReturnCallIndirect { type_index: u32, table_index: u32 } => visit_return_call_indirect
+            @exceptions Delegate { relative_depth: u32 } => visit_delegate
+            @exceptions CatchAll => visit_catch_all
             @mvp Drop => visit_drop
             @mvp Select => visit_select
             @reference_types TypedSelect { ty: $crate::ValType } => visit_typed_select
@@ -174,7 +181,7 @@ macro_rules! for_each_operator {
             @mvp I64Const { value: i64 } => visit_i64_const
             @mvp F32Const { value: $crate::Ieee32 } => visit_f32_const
             @mvp F64Const { value: $crate::Ieee64 } => visit_f64_const
-            @reference_types RefNull { ty: $crate::ValType } => visit_ref_null
+            @reference_types RefNull { hty: $crate::HeapType } => visit_ref_null
             @reference_types RefIsNull => visit_ref_is_null
             @reference_types RefFunc { function_index: u32 } => visit_ref_func
             @mvp I32Eqz => visit_i32_eqz
@@ -300,44 +307,63 @@ macro_rules! for_each_operator {
             @mvp I64ReinterpretF64 => visit_i64_reinterpret_f64
             @mvp F32ReinterpretI32 => visit_f32_reinterpret_i32
             @mvp F64ReinterpretI64 => visit_f64_reinterpret_i64
-            @sign_ext_ops I32Extend8S => visit_i32_extend8_s
-            @sign_ext_ops I32Extend16S => visit_i32_extend16_s
-            @sign_ext_ops I64Extend8S => visit_i64_extend8_s
-            @sign_ext_ops I64Extend16S => visit_i64_extend16_s
-            @sign_ext_ops I64Extend32S => visit_i64_extend32_s
+            @sign_extension I32Extend8S => visit_i32_extend8_s
+            @sign_extension I32Extend16S => visit_i32_extend16_s
+            @sign_extension I64Extend8S => visit_i64_extend8_s
+            @sign_extension I64Extend16S => visit_i64_extend16_s
+            @sign_extension I64Extend32S => visit_i64_extend32_s
+
+            // 0xFB prefixed operators
+            // Garbage Collection
+            // http://github.com/WebAssembly/gc
+            @gc RefI31 => visit_ref_i31
+            @gc I31GetS => visit_i31_get_s
+            @gc I31GetU => visit_i31_get_u
 
             // 0xFC operators
             // Non-trapping Float-to-int Conversions
-            @non_trapping_f2i_conversions I32TruncSatF32S => visit_i32_trunc_sat_f32_s
-            @non_trapping_f2i_conversions I32TruncSatF32U => visit_i32_trunc_sat_f32_u
-            @non_trapping_f2i_conversions I32TruncSatF64S => visit_i32_trunc_sat_f64_s
-            @non_trapping_f2i_conversions I32TruncSatF64U => visit_i32_trunc_sat_f64_u
-            @non_trapping_f2i_conversions I64TruncSatF32S => visit_i64_trunc_sat_f32_s
-            @non_trapping_f2i_conversions I64TruncSatF32U => visit_i64_trunc_sat_f32_u
-            @non_trapping_f2i_conversions I64TruncSatF64S => visit_i64_trunc_sat_f64_s
-            @non_trapping_f2i_conversions I64TruncSatF64U => visit_i64_trunc_sat_f64_u
+            // https://github.com/WebAssembly/nontrapping-float-to-int-conversions
+            @saturating_float_to_int I32TruncSatF32S => visit_i32_trunc_sat_f32_s
+            @saturating_float_to_int I32TruncSatF32U => visit_i32_trunc_sat_f32_u
+            @saturating_float_to_int I32TruncSatF64S => visit_i32_trunc_sat_f64_s
+            @saturating_float_to_int I32TruncSatF64U => visit_i32_trunc_sat_f64_u
+            @saturating_float_to_int I64TruncSatF32S => visit_i64_trunc_sat_f32_s
+            @saturating_float_to_int I64TruncSatF32U => visit_i64_trunc_sat_f32_u
+            @saturating_float_to_int I64TruncSatF64S => visit_i64_trunc_sat_f64_s
+            @saturating_float_to_int I64TruncSatF64U => visit_i64_trunc_sat_f64_u
 
-            // 0xFC operators
-            // bulk memory https://github.com/WebAssembly/bulk-memory-operations/blob/master/proposals/bulk-memory-operations/Overview.md
-            @bulk_memory MemoryInit { segment: u32, mem: u32 } => visit_memory_init
-            @bulk_memory DataDrop { segment: u32 } => visit_data_drop
-            @bulk_memory MemoryCopy { dst: u32, src: u32 } => visit_memory_copy
+            // 0xFC prefixed operators
+            // bulk memory operations
+            // https://github.com/WebAssembly/bulk-memory-operations
+            @bulk_memory MemoryInit { data_index: u32, mem: u32 } => visit_memory_init
+            @bulk_memory DataDrop { data_index: u32 } => visit_data_drop
+            @bulk_memory MemoryCopy { dst_mem: u32, src_mem: u32 } => visit_memory_copy
             @bulk_memory MemoryFill { mem: u32 } => visit_memory_fill
-            @bulk_memory TableInit { segment: u32, table: u32 } => visit_table_init
-            @bulk_memory ElemDrop { segment: u32 } => visit_elem_drop
+            @bulk_memory TableInit { elem_index: u32, table: u32 } => visit_table_init
+            @bulk_memory ElemDrop { elem_index: u32 } => visit_elem_drop
             @bulk_memory TableCopy { dst_table: u32, src_table: u32 } => visit_table_copy
-            @bulk_memory TableFill { table: u32 } => visit_table_fill
-            @bulk_memory TableGet { table: u32 } => visit_table_get
-            @bulk_memory TableSet { table: u32 } => visit_table_set
-            @bulk_memory TableGrow { table: u32 } => visit_table_grow
-            @bulk_memory TableSize { table: u32 } => visit_table_size
 
-            // 0xFE operators
-            // https://github.com/WebAssembly/threads/blob/master/proposals/threads/Overview.md
+            // 0xFC prefixed operators
+            // reference-types
+            // https://github.com/WebAssembly/reference-types
+            @reference_types TableFill { table: u32 } => visit_table_fill
+            @reference_types TableGet { table: u32 } => visit_table_get
+            @reference_types TableSet { table: u32 } => visit_table_set
+            @reference_types TableGrow { table: u32 } => visit_table_grow
+            @reference_types TableSize { table: u32 } => visit_table_size
+
+            // OxFC prefixed operators
+            // memory control (experimental)
+            // https://github.com/WebAssembly/design/issues/1439
+            @memory_control MemoryDiscard { mem: u32 } => visit_memory_discard
+
+            // 0xFE prefixed operators
+            // threads
+            // https://github.com/WebAssembly/threads
             @threads MemoryAtomicNotify { memarg: $crate::MemArg } => visit_memory_atomic_notify
             @threads MemoryAtomicWait32 { memarg: $crate::MemArg } => visit_memory_atomic_wait32
             @threads MemoryAtomicWait64 { memarg: $crate::MemArg } => visit_memory_atomic_wait64
-            @threads AtomicFence { flags: u8 } => visit_atomic_fence
+            @threads AtomicFence => visit_atomic_fence
             @threads I32AtomicLoad { memarg: $crate::MemArg } => visit_i32_atomic_load
             @threads I64AtomicLoad { memarg: $crate::MemArg } => visit_i64_atomic_load
             @threads I32AtomicLoad8U { memarg: $crate::MemArg } => visit_i32_atomic_load8_u
@@ -403,7 +429,9 @@ macro_rules! for_each_operator {
             @threads I64AtomicRmw32CmpxchgU { memarg: $crate::MemArg } => visit_i64_atomic_rmw32_cmpxchg_u
 
             // 0xFD operators
-            // SIMD https://webassembly.github.io/simd/core/binary/instructions.html
+            // 128-bit SIMD
+            // - https://github.com/webassembly/simd
+            // - https://webassembly.github.io/simd/core/binary/instructions.html
             @simd V128Load { memarg: $crate::MemArg } => visit_v128_load
             @simd V128Load8x8S { memarg: $crate::MemArg } => visit_v128_load8x8_s
             @simd V128Load8x8U { memarg: $crate::MemArg } => visit_v128_load8x8_u
@@ -524,7 +552,7 @@ macro_rules! for_each_operator {
             @simd I8x16MinU => visit_i8x16_min_u
             @simd I8x16MaxS => visit_i8x16_max_s
             @simd I8x16MaxU => visit_i8x16_max_u
-            @simd I8x16RoundingAverageU => visit_i8x16_avgr_u
+            @simd I8x16AvgrU => visit_i8x16_avgr_u
             @simd I16x8ExtAddPairwiseI8x16S => visit_i16x8_extadd_pairwise_i8x16_s
             @simd I16x8ExtAddPairwiseI8x16U => visit_i16x8_extadd_pairwise_i8x16_u
             @simd I16x8Abs => visit_i16x8_abs
@@ -552,7 +580,7 @@ macro_rules! for_each_operator {
             @simd I16x8MinU => visit_i16x8_min_u
             @simd I16x8MaxS => visit_i16x8_max_s
             @simd I16x8MaxU => visit_i16x8_max_u
-            @simd I16x8RoundingAverageU => visit_i16x8_avgr_u
+            @simd I16x8AvgrU => visit_i16x8_avgr_u
             @simd I16x8ExtMulLowI8x16S => visit_i16x8_extmul_low_i8x16_s
             @simd I16x8ExtMulHighI8x16S => visit_i16x8_extmul_high_i8x16_s
             @simd I16x8ExtMulLowI8x16U => visit_i16x8_extmul_low_i8x16_u
@@ -642,23 +670,34 @@ macro_rules! for_each_operator {
             @simd F64x2PromoteLowF32x4 => visit_f64x2_promote_low_f32x4
 
             // Relaxed SIMD operators
+            // https://github.com/WebAssembly/relaxed-simd
             @relaxed_simd I8x16RelaxedSwizzle => visit_i8x16_relaxed_swizzle
-            @relaxed_simd I32x4RelaxedTruncSatF32x4S => visit_i32x4_relaxed_trunc_sat_f32x4_s
-            @relaxed_simd I32x4RelaxedTruncSatF32x4U => visit_i32x4_relaxed_trunc_sat_f32x4_u
-            @relaxed_simd I32x4RelaxedTruncSatF64x2SZero => visit_i32x4_relaxed_trunc_sat_f64x2_s_zero
-            @relaxed_simd I32x4RelaxedTruncSatF64x2UZero => visit_i32x4_relaxed_trunc_sat_f64x2_u_zero
-            @relaxed_simd F32x4Fma => visit_f32x4_fma
-            @relaxed_simd F32x4Fms => visit_f32x4_fms
-            @relaxed_simd F64x2Fma => visit_f64x2_fma
-            @relaxed_simd F64x2Fms => visit_f64x2_fms
-            @relaxed_simd I8x16LaneSelect => visit_i8x16_laneselect
-            @relaxed_simd I16x8LaneSelect => visit_i16x8_laneselect
-            @relaxed_simd I32x4LaneSelect => visit_i32x4_laneselect
-            @relaxed_simd I64x2LaneSelect => visit_i64x2_laneselect
+            @relaxed_simd I32x4RelaxedTruncF32x4S => visit_i32x4_relaxed_trunc_f32x4_s
+            @relaxed_simd I32x4RelaxedTruncF32x4U => visit_i32x4_relaxed_trunc_f32x4_u
+            @relaxed_simd I32x4RelaxedTruncF64x2SZero => visit_i32x4_relaxed_trunc_f64x2_s_zero
+            @relaxed_simd I32x4RelaxedTruncF64x2UZero => visit_i32x4_relaxed_trunc_f64x2_u_zero
+            @relaxed_simd F32x4RelaxedMadd => visit_f32x4_relaxed_madd
+            @relaxed_simd F32x4RelaxedNmadd => visit_f32x4_relaxed_nmadd
+            @relaxed_simd F64x2RelaxedMadd => visit_f64x2_relaxed_madd
+            @relaxed_simd F64x2RelaxedNmadd => visit_f64x2_relaxed_nmadd
+            @relaxed_simd I8x16RelaxedLaneselect => visit_i8x16_relaxed_laneselect
+            @relaxed_simd I16x8RelaxedLaneselect => visit_i16x8_relaxed_laneselect
+            @relaxed_simd I32x4RelaxedLaneselect => visit_i32x4_relaxed_laneselect
+            @relaxed_simd I64x2RelaxedLaneselect => visit_i64x2_relaxed_laneselect
             @relaxed_simd F32x4RelaxedMin => visit_f32x4_relaxed_min
             @relaxed_simd F32x4RelaxedMax => visit_f32x4_relaxed_max
             @relaxed_simd F64x2RelaxedMin => visit_f64x2_relaxed_min
             @relaxed_simd F64x2RelaxedMax => visit_f64x2_relaxed_max
+            @relaxed_simd I16x8RelaxedQ15mulrS => visit_i16x8_relaxed_q15mulr_s
+            @relaxed_simd I16x8RelaxedDotI8x16I7x16S => visit_i16x8_relaxed_dot_i8x16_i7x16_s
+            @relaxed_simd I32x4RelaxedDotI8x16I7x16AddS => visit_i32x4_relaxed_dot_i8x16_i7x16_add_s
+
+            // Typed Function references
+            @function_references CallRef { type_index: u32 } => visit_call_ref
+            @function_references ReturnCallRef { type_index: u32 } => visit_return_call_ref
+            @function_references RefAsNonNull => visit_ref_as_non_null
+            @function_references BrOnNull { relative_depth: u32 } => visit_br_on_null
+            @function_references BrOnNonNull { relative_depth: u32 } => visit_br_on_non_null
         }
     };
 }

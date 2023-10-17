@@ -1,5 +1,5 @@
 (component
-  (import "log" (func $log (param string)))
+  (import "log" (func $log (param "msg" string)))
   (core module $libc
     (memory (export "memory") 1)
     (func (export "canonical_abi_realloc") (param i32 i32 i32 i32) (result i32)
@@ -45,7 +45,7 @@
     ))
   ))
 
-  (func (export "log1") (param string)
+  (func (export "log1") (param "msg" string)
     (canon lift
       (core func $my_instance "log-utf8")
       string-encoding=utf8
@@ -53,7 +53,7 @@
       (realloc $realloc)
     )
   )
-  (func (export "log2") (param string)
+  (func (export "log2") (param "msg" string)
     (canon lift
       (core func $my_instance "log-utf16")
       string-encoding=utf16
@@ -61,7 +61,7 @@
       (realloc $realloc)
     )
   )
-  (func (export "log3") (param string)
+  (func (export "log3") (param "msg" string)
     (canon lift
       (core func $my_instance "log-compact-utf16")
       string-encoding=latin1+utf16
@@ -73,35 +73,35 @@
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "i" (func $f))
     (core func (canon lower (func $f) string-encoding=utf8 string-encoding=utf16))
   )
   "canonical encoding option `utf8` conflicts with option `utf16`")
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "i" (func $f))
     (core func (canon lower (func $f) string-encoding=utf8 string-encoding=latin1+utf16))
   )
   "canonical encoding option `utf8` conflicts with option `latin1-utf16`")
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "i" (func $f))
     (core func (canon lower (func $f) string-encoding=utf16 string-encoding=latin1+utf16))
   )
   "canonical encoding option `utf16` conflicts with option `latin1-utf16`")
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "i" (func $f))
     (core func (canon lower (func $f) (memory 0)))
   )
   "memory index out of bounds")
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "i" (func $f))
     (core module $m (memory (export "memory") 1))
     (core instance $i (instantiate $m))
     (core func (canon lower (func $f) (memory $i "memory") (memory $i "memory")))
@@ -114,7 +114,7 @@
       (func (export "f") (param i32 i32))
     )
     (core instance $i (instantiate $m))
-    (func (param (list u8)) (canon lift (core func $i "f")))
+    (func (param "p1" (list u8)) (canon lift (core func $i "f")))
   )
   "canonical option `memory` is required")
 
@@ -125,7 +125,7 @@
       (func (export "f") (param i32 i32))
     )
     (core instance $i (instantiate $m))
-    (func (param (list u8))
+    (func (param "p1" (list u8))
       (canon lift (core func $i "f")
         (memory $i "m")
       )
@@ -141,7 +141,7 @@
       (func (export "r") (param i32 i32 i32 i32) (result i32))
     )
     (core instance $i (instantiate $m))
-    (func (param (list u8))
+    (func (param "p1" (list u8))
       (canon lift (core func $i "f")
         (memory $i "m")
         (realloc (func $i "r"))
@@ -159,7 +159,7 @@
       (func (export "r"))
     )
     (core instance $i (instantiate $m))
-    (func (param (list u8))
+    (func (param "p1" (list u8))
       (canon lift (core func $i "f")
         (memory $i "m")
         (realloc (func $i "r"))
@@ -209,7 +209,7 @@
 
 (assert_invalid
   (component
-    (import "" (func $f (param string)))
+    (import "i" (func $f (param "p1" string)))
     (core module $m
       (memory (export "m") 1)
       (func (export "f") (result i32))
@@ -252,7 +252,7 @@
     (core instance $i (instantiate $m))
     (core func (canon lower (func $i "")))
   )
-  "failed to find instance named `$i`")
+  "unknown instance: failed to find name `$i`")
 
 (assert_invalid
   (component
@@ -281,7 +281,7 @@
 
 (assert_invalid
   (component
-    (import "" (func $f))
+    (import "a" (func $f))
     (func (export "foo") (canon lift (core func $f)))
   )
-  "failed to find core func named `$f`")
+  "unknown core func: failed to find name `$f`")

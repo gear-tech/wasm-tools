@@ -17,6 +17,9 @@ use wasmparser::{FuncValidatorAllocations, Parser, ValidPayload, Validator, Wasm
 /// # Validate `foo.wasm` with the default Wasm feature proposals.
 /// $ wasm-tools validate foo.wasm
 ///
+/// # Validate `foo.wasm` with more verbose output
+/// $ wasm-tools validate -vv foo.wasm
+///
 /// # Validate `fancy.wasm` with all Wasm feature proposals enabled.
 /// $ wasm-tools validate --features all fancy.wasm
 ///
@@ -30,7 +33,10 @@ pub struct Opts {
     /// The placeholder "all" can be used to enable all wasm features. If a "-"
     /// character is present in front of a feature it will disable that feature.
     /// For example "all,-simd" would enable everything but simd.
-    #[clap(long, short = 'f', parse(try_from_str = parse_features))]
+    ///
+    /// Available feature options can be found in the wasmparser crate:
+    /// https://github.com/bytecodealliance/wasm-tools/blob/main/crates/wasmparser/src/validator.rs
+    #[clap(long, short = 'f', value_parser = parse_features)]
     features: Option<WasmFeatures>,
 
     #[clap(flatten)]
@@ -38,6 +44,10 @@ pub struct Opts {
 }
 
 impl Opts {
+    pub fn general_opts(&self) -> &wasm_tools::GeneralOpts {
+        self.io.general_opts()
+    }
+
     pub fn run(&self) -> Result<()> {
         // Note that here we're copying the contents of
         // `Validator::validate_all`, but the end is followed up with a parallel
@@ -89,23 +99,26 @@ fn parse_features(arg: &str) -> Result<WasmFeatures> {
 
     const FEATURES: &[(&str, fn(&mut WasmFeatures) -> &mut bool)] = &[
         ("reference-types", |f| &mut f.reference_types),
+        ("function-references", |f| &mut f.function_references),
         ("simd", |f| &mut f.simd),
         ("threads", |f| &mut f.threads),
         ("bulk-memory", |f| &mut f.bulk_memory),
         ("multi-value", |f| &mut f.multi_value),
         ("tail-call", |f| &mut f.tail_call),
         ("component-model", |f| &mut f.component_model),
+        ("component-model-values", |f| &mut f.component_model_values),
         ("multi-memory", |f| &mut f.multi_memory),
         ("exception-handling", |f| &mut f.exceptions),
         ("memory64", |f| &mut f.memory64),
         ("extended-const", |f| &mut f.extended_const),
-        ("deterministic", |f| &mut f.deterministic_only),
+        ("floats", |f| &mut f.floats),
         ("saturating-float-to-int", |f| {
             &mut f.saturating_float_to_int
         }),
         ("sign-extension", |f| &mut f.sign_extension),
         ("mutable-global", |f| &mut f.mutable_global),
         ("relaxed-simd", |f| &mut f.relaxed_simd),
+        ("gc", |f| &mut f.gc),
     ];
 
     for part in arg.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -127,10 +140,17 @@ fn parse_features(arg: &str) -> Result<WasmFeatures> {
             }
 
             name => {
-                let (_, accessor) = FEATURES
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .ok_or_else(|| anyhow!("unknown feature `{}`", name))?;
+                let (_, accessor) = FEATURES.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+                    anyhow!(
+                        "unknown feature `{}`\nValid features: {}",
+                        name,
+                        FEATURES
+                            .iter()
+                            .map(|(name, _)| *name)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                })?;
                 *accessor(&mut ret) = enable;
             }
         }

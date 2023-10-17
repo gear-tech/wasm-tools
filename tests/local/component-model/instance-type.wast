@@ -11,8 +11,8 @@
     ;; functions
     (export "a" (func))
     (export "b" (func $foo))
-    (export "c" (func (@name "bar")))
-    (export "d" (func $foo (@name "bar")))
+    (export "c" (func))
+    (export "d" (func $foo))
     (export "e" (func (type $local_type)))
     (export "f" (func (param i32)))
     (export "g" (func (param i32) (result i32 i64)))
@@ -39,49 +39,49 @@
     ;; functions
     (export "a" (func))
     (export "a2" (func (type $local_type)))
-    (export "b" (func $foo))
-    (export "c" (func (@name "bar")))
-    (export "d" (func $foo (@name "bar")))
+    (export "b" (func))
+    (export "c" (func))
+    (export "d" (func))
     (export "e" (func (type $t)))
-    (export "f" (func (param string)))
-    (export "g" (func (param s32) (result u32)))
+    (export "f" (func (param "f" string)))
+    (export "g" (func (param "g" s32) (result u32)))
     (export "h" (func (type $t)))
 
     ;; components
     (type $component_type (component))
     (export "c1" (component))
-    (export "c2" (component (import "" (func))))
-    (export "c3" (component (export "" (func))))
+    (export "c2" (component (import "i1" (func))))
+    (export "c3" (component (export "e1" (func))))
     (export "c4" (component (type $component_type)))
     (export "c5" (component
       (type $nested_func_type (func))
       (alias outer $outer $local_type (type $my_type))
-      (import "1" (func (type $nested_func_type)))
-      (import "2" (component))
-      (export "1" (func (type $my_type)))
-      (export "2" (component))
+      (import "i1" (func (type $nested_func_type)))
+      (import "i2" (component))
+      (export "e1" (func (type $my_type)))
+      (export "e2" (component))
     ))
   ))
 )
 
 ;; expand inline types
 (component
-  (type (instance (export "" (instance))))
+  (type (instance (export "a" (instance))))
 )
 
 ;; reference outer types
 (component
   (type (instance
     (type $t (instance))
-    (export "" (instance (type $t)))
+    (export "a" (instance (type $t)))
   ))
   (type $x (instance))
-  (type (instance (export "" (instance (type $x)))))
+  (type (instance (export "a" (instance (type $x)))))
 )
 
 ;; recursive
 (component
-  (type (instance (export "" (core module
+  (type (instance (export "a" (core module
     (type $functype (func))
 
     (export "a" (func))
@@ -135,15 +135,15 @@
   (type (component
     (import "a" (func))
     (import "b" (func (type $empty)))
-    (import "c" (func (param s32)))
-    (import "d" (func (param s32) (result s32)))
+    (import "c" (func (param "c" s32)))
+    (import "d" (func (param "d" s32) (result s32)))
 
     (import "h" (instance))
     (import "i" (instance (type $i)))
     (import "j" (instance
       (export "a" (func))
       (export "b" (func (type $empty)))
-      (export "c" (func (param s32)))
+      (export "c" (func (param "c" s32)))
     ))
 
     (import "k" (core module))
@@ -155,17 +155,17 @@
       (export "b" (func (param i32)))
     ))
 
-    (export "a" (func))
-    (export "e" (func (type $empty)))
-    (export "f" (func (param s32)))
+    (export "m" (func))
+    (export "n" (func (type $empty)))
+    (export "o" (func (param "f" s32)))
 
-    (export "g" (instance
+    (export "p" (instance
       (export "a" (func))
       (export "b" (func (type $empty)))
-      (export "c" (func (param s32)))
+      (export "c" (func (param "c" s32)))
     ))
 
-    (export "h" (core module
+    (export "q" (core module
       (type $empty (func))
       (import "" "a" (func (type $empty)))
       (import "" "b" (func (param i32)))
@@ -178,15 +178,15 @@
 (assert_invalid
   (component
     (type (instance
-      (export "" (func))
-      (export "" (func)))))
-  "duplicate export name")
+      (export "a" (func))
+      (export "a" (func)))))
+  "export name `a` conflicts with previous name `a`")
 
 (assert_invalid
   (component
     (type $t (func))
     (type (instance
-      (export "" (instance (type $t)))
+      (export "a" (instance (type $t)))
     )))
   "type index 0 is not an instance type")
 
@@ -194,7 +194,7 @@
   (component
     (core type $t (func))
     (type (instance
-      (export "" (core module (type $t)))
+      (export "a" (core module (type $t)))
     )))
   "core type index 0 is not a module type")
 
@@ -202,15 +202,15 @@
   (component
     (type $t (func))
     (type (instance
-      (export "" (core module (type $t)))
+      (export "a" (core module (type $t)))
     )))
-  "failed to find core type named `$t`")
+  "unknown core type")
 
 (assert_invalid
   (component
     (type $t (record (field "a" string)))
     (type (instance
-      (export "" (func (type $t)))
+      (export "a" (func (type $t)))
     )))
   "type index 0 is not a function type")
 
@@ -218,7 +218,7 @@
   (component
     (type $t (instance))
     (type (instance
-      (export "" (func (type $t)))
+      (export "a" (func (type $t)))
     )))
   "type index 0 is not a function type")
 
@@ -226,8 +226,8 @@
   (component
     (type $t (instance))
     (type (instance
-      (export "" (instance
-        (export "" (func (type $t)))
+      (export "a" (instance
+        (export "a" (func (type $t)))
       ))
     )))
   "type index 0 is not a function type")

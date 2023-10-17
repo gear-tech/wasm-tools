@@ -1,6 +1,7 @@
 //! A mutator to add a new type to a Wasm module.
 
 use super::Mutator;
+use crate::module::map_type;
 use crate::Result;
 use rand::Rng;
 use std::iter;
@@ -22,8 +23,8 @@ impl AddTypeMutator {
             2 => wasm_encoder::ValType::F32,
             3 => wasm_encoder::ValType::F64,
             4 => wasm_encoder::ValType::V128,
-            5 => wasm_encoder::ValType::ExternRef,
-            6 => wasm_encoder::ValType::FuncRef,
+            5 => wasm_encoder::ValType::EXTERNREF,
+            6 => wasm_encoder::ValType::FUNCREF,
             _ => unreachable!(),
         }
     }
@@ -35,7 +36,7 @@ impl Mutator for AddTypeMutator {
     }
 
     fn mutate<'a>(
-        self,
+        &self,
         config: &'a mut crate::WasmMutate,
     ) -> crate::Result<Box<dyn Iterator<Item = crate::Result<wasm_encoder::Module>> + 'a>> {
         let count = config.rng().gen_range(0..=self.max_params);
@@ -53,24 +54,22 @@ impl Mutator for AddTypeMutator {
         let mut types = wasm_encoder::TypeSection::new();
         if let Some(old_types) = config.info().get_type_section() {
             // Copy the existing types section over into the encoder.
-            let mut reader = wasmparser::TypeSectionReader::new(old_types.data, 0)?;
-            for _ in 0..reader.get_count() {
-                let ty = reader.read()?;
-                match ty {
-                    wasmparser::Type::Func(ty) => {
-                        let params = ty
-                            .params()
-                            .iter()
-                            .map(translate_type)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let results = ty
-                            .results()
-                            .iter()
-                            .map(translate_type)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        types.function(params, results);
-                    }
-                }
+            let reader = wasmparser::TypeSectionReader::new(old_types.data, 0)?;
+            for ty in reader.into_iter_err_on_gc_types() {
+                let ty = ty?;
+                let params = ty
+                    .params()
+                    .iter()
+                    .copied()
+                    .map(map_type)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let results = ty
+                    .results()
+                    .iter()
+                    .copied()
+                    .map(map_type)
+                    .collect::<Result<Vec<_>, _>>()?;
+                types.function(params, results);
             }
             // And then add our new type.
             types.function(params, results);
@@ -85,18 +84,6 @@ impl Mutator for AddTypeMutator {
                 .insert_section(0, &types)))))
         }
     }
-}
-
-fn translate_type(ty: &wasmparser::ValType) -> Result<wasm_encoder::ValType> {
-    Ok(match ty {
-        wasmparser::ValType::I32 => wasm_encoder::ValType::I32,
-        wasmparser::ValType::I64 => wasm_encoder::ValType::I64,
-        wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
-        wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
-        wasmparser::ValType::V128 => wasm_encoder::ValType::V128,
-        wasmparser::ValType::FuncRef => wasm_encoder::ValType::FuncRef,
-        wasmparser::ValType::ExternRef => wasm_encoder::ValType::ExternRef,
-    })
 }
 
 #[cfg(test)]

@@ -38,7 +38,6 @@ pub struct Opts {
     /// The arbitrary input seed.
     ///
     /// `stdin` is used if this argument is not supplied.
-    #[clap(parse(from_os_str))]
     input: Option<PathBuf>,
 
     #[clap(flatten)]
@@ -70,14 +69,17 @@ pub struct Opts {
     fuel: Option<u32>,
 
     /// JSON configuration file with settings to control the wasm output.
-    #[clap(short = 'c', long = "config", parse(from_os_str))]
+    #[clap(short = 'c', long = "config")]
     config: Option<PathBuf>,
 
     #[clap(flatten)]
     module_config: Config,
+
+    #[clap(flatten)]
+    general: wasm_tools::GeneralOpts,
 }
 
-#[derive(Default, Debug, Parser, Clone, serde::Deserialize)]
+#[derive(Default, Debug, Parser, Clone, serde_derive::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct Config {
     #[clap(long = "min-types")]
@@ -144,6 +146,9 @@ struct Config {
     #[clap(long = "reference-types")]
     #[serde(rename = "reference-types")]
     reference_types_enabled: Option<bool>,
+    #[clap(long = "tail-call")]
+    #[serde(rename = "tail-call")]
+    tail_call_enabled: Option<bool>,
     #[clap(long = "simd")]
     #[serde(rename = "simd")]
     simd_enabled: Option<bool>,
@@ -190,6 +195,10 @@ struct Config {
 }
 
 impl Opts {
+    pub fn general_opts(&self) -> &wasm_tools::GeneralOpts {
+        &self.general
+    }
+
     pub fn run(&self) -> Result<()> {
         let seed = match &self.input {
             Some(f) => {
@@ -294,6 +303,7 @@ impl wasm_smith::Config for CliAndJsonConfig {
         (min_uleb_size, u8, 1),
         (bulk_memory_enabled, bool, true),
         (reference_types_enabled, bool, true),
+        (tail_call_enabled, bool, true),
         (simd_enabled, bool, true),
         (relaxed_simd_enabled, bool, false),
         (exceptions_enabled, bool, false),

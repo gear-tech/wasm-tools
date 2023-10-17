@@ -663,15 +663,15 @@ impl<'a> DFGBuilder {
                     self.push_node(Lang::TableSize(*table), idx);
                 }
 
-                Operator::DataDrop { segment } => {
-                    self.empty_node(Lang::DataDrop(*segment), idx);
+                Operator::DataDrop { data_index } => {
+                    self.empty_node(Lang::DataDrop(*data_index), idx);
                 }
 
-                Operator::ElemDrop { segment } => {
-                    self.empty_node(Lang::ElemDrop(*segment), idx);
+                Operator::ElemDrop { elem_index } => {
+                    self.empty_node(Lang::ElemDrop(*elem_index), idx);
                 }
 
-                Operator::MemoryInit { mem, segment } => {
+                Operator::MemoryInit { mem, data_index } => {
                     let a = Id::from(self.pop_operand(idx, false));
                     let b = Id::from(self.pop_operand(idx, false));
                     let c = Id::from(self.pop_operand(idx, false));
@@ -679,22 +679,22 @@ impl<'a> DFGBuilder {
                         Lang::MemoryInit(
                             MemoryInit {
                                 memory: *mem,
-                                segment: *segment,
+                                segment: *data_index,
                             },
                             [c, b, a],
                         ),
                         idx,
                     );
                 }
-                Operator::MemoryCopy { src, dst } => {
+                Operator::MemoryCopy { src_mem, dst_mem } => {
                     let a = Id::from(self.pop_operand(idx, false));
                     let b = Id::from(self.pop_operand(idx, false));
                     let c = Id::from(self.pop_operand(idx, false));
                     self.empty_node(
                         Lang::MemoryCopy(
                             MemoryCopy {
-                                src: *src,
-                                dst: *dst,
+                                src: *src_mem,
+                                dst: *dst_mem,
                             },
                             [c, b, a],
                         ),
@@ -709,7 +709,7 @@ impl<'a> DFGBuilder {
                     self.empty_node(Lang::MemoryFill(*mem, [c, b, a]), idx);
                 }
 
-                Operator::TableInit { table, segment } => {
+                Operator::TableInit { table, elem_index } => {
                     let a = Id::from(self.pop_operand(idx, false));
                     let b = Id::from(self.pop_operand(idx, false));
                     let c = Id::from(self.pop_operand(idx, false));
@@ -717,7 +717,7 @@ impl<'a> DFGBuilder {
                         Lang::TableInit(
                             TableInit {
                                 table: *table,
-                                segment: *segment,
+                                segment: *elem_index,
                             },
                             [c, b, a],
                         ),
@@ -762,14 +762,17 @@ impl<'a> DFGBuilder {
                 }
 
                 Operator::RefNull {
-                    ty: wasmparser::ValType::ExternRef,
+                    hty: wasmparser::HeapType::Extern,
                 } => {
                     self.push_node(Lang::RefNull(RefType::Extern), idx);
                 }
                 Operator::RefNull {
-                    ty: wasmparser::ValType::FuncRef,
+                    hty: wasmparser::HeapType::Func,
                 } => {
                     self.push_node(Lang::RefNull(RefType::Func), idx);
+                }
+                Operator::RefNull { .. } => {
+                    unimplemented!()
                 }
                 Operator::RefFunc { function_index } => {
                     self.push_node(Lang::RefFunc(*function_index), idx);
@@ -945,7 +948,7 @@ impl<'a> DFGBuilder {
                 Operator::I8x16MinU => self.binop(idx, Lang::I8x16MinU),
                 Operator::I8x16MaxS => self.binop(idx, Lang::I8x16MaxS),
                 Operator::I8x16MaxU => self.binop(idx, Lang::I8x16MaxU),
-                Operator::I8x16RoundingAverageU => self.binop(idx, Lang::I8x16AvgrU),
+                Operator::I8x16AvgrU => self.binop(idx, Lang::I8x16AvgrU),
 
                 Operator::I16x8ExtAddPairwiseI8x16S => {
                     self.unop(idx, Lang::I16x8ExtAddPairwiseI8x16S)
@@ -978,7 +981,7 @@ impl<'a> DFGBuilder {
                 Operator::I16x8MinU => self.binop(idx, Lang::I16x8MinU),
                 Operator::I16x8MaxS => self.binop(idx, Lang::I16x8MaxS),
                 Operator::I16x8MaxU => self.binop(idx, Lang::I16x8MaxU),
-                Operator::I16x8RoundingAverageU => self.binop(idx, Lang::I16x8AvgrU),
+                Operator::I16x8AvgrU => self.binop(idx, Lang::I16x8AvgrU),
                 Operator::I16x8ExtMulLowI8x16S => self.binop(idx, Lang::I16x8ExtMulLowI8x16S),
                 Operator::I16x8ExtMulHighI8x16S => self.binop(idx, Lang::I16x8ExtMulHighI8x16S),
                 Operator::I16x8ExtMulLowI8x16U => self.binop(idx, Lang::I16x8ExtMulLowI8x16U),

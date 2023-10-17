@@ -11,7 +11,7 @@ use std::mem;
 ///
 /// This expansion is intended to desugar the AST from various parsed constructs
 /// to bits and bobs amenable for name resolution as well as binary encoding.
-/// For example `(import "" (func))` is split into a type definition followed by
+/// For example `(import "i" (func))` is split into a type definition followed by
 /// the import referencing that type definition.
 ///
 /// Most forms of AST expansion happen in this file and afterwards the AST will
@@ -121,10 +121,16 @@ impl<'a> Expander<'a> {
                 self.expand_item_sig(&mut i.item);
                 None
             }
+            ComponentField::Export(e) => {
+                if let Some(sig) = &mut e.ty {
+                    self.expand_item_sig(&mut sig.0);
+                }
+                None
+            }
             ComponentField::Start(_)
             | ComponentField::Alias(_)
-            | ComponentField::Export(_)
-            | ComponentField::Custom(_) => None,
+            | ComponentField::Custom(_)
+            | ComponentField::Producers(_) => None,
         };
 
         if let Some(expanded) = expanded {
@@ -138,8 +144,11 @@ impl<'a> Expander<'a> {
             self.component_fields_to_append
                 .push(ComponentField::Export(ComponentExport {
                     span: module.span,
+                    id: None,
+                    debug_name: None,
                     name,
                     kind: ComponentExportKind::module(module.span, id),
+                    ty: None,
                 }));
         }
         match &mut module.kind {
@@ -181,8 +190,11 @@ impl<'a> Expander<'a> {
             self.component_fields_to_append
                 .push(ComponentField::Export(ComponentExport {
                     span: component.span,
+                    id: None,
+                    debug_name: None,
                     name,
                     kind: ComponentExportKind::component(component.span, id),
+                    ty: None,
                 }));
         }
         match &mut component.kind {
@@ -212,8 +224,11 @@ impl<'a> Expander<'a> {
             self.component_fields_to_append
                 .push(ComponentField::Export(ComponentExport {
                     span: instance.span,
+                    id: None,
+                    debug_name: None,
                     name,
                     kind: ComponentExportKind::instance(instance.span, id),
+                    ty: None,
                 }));
         }
         match &mut instance.kind {
@@ -245,7 +260,10 @@ impl<'a> Expander<'a> {
             CanonicalFuncKind::Lift { ty, .. } => {
                 self.expand_component_type_use(ty);
             }
-            CanonicalFuncKind::Lower(_) => {}
+            CanonicalFuncKind::Lower(_)
+            | CanonicalFuncKind::ResourceNew(_)
+            | CanonicalFuncKind::ResourceRep(_)
+            | CanonicalFuncKind::ResourceDrop(_) => {}
         }
     }
 
@@ -267,6 +285,26 @@ impl<'a> Expander<'a> {
                 name: func.name,
                 kind: CanonicalFuncKind::Lower(mem::take(info)),
             })),
+            CoreFuncKind::ResourceNew(info) => Some(ComponentField::CanonicalFunc(CanonicalFunc {
+                span: func.span,
+                id: func.id,
+                name: func.name,
+                kind: CanonicalFuncKind::ResourceNew(mem::take(info)),
+            })),
+            CoreFuncKind::ResourceDrop(info) => {
+                Some(ComponentField::CanonicalFunc(CanonicalFunc {
+                    span: func.span,
+                    id: func.id,
+                    name: func.name,
+                    kind: CanonicalFuncKind::ResourceDrop(mem::take(info)),
+                }))
+            }
+            CoreFuncKind::ResourceRep(info) => Some(ComponentField::CanonicalFunc(CanonicalFunc {
+                span: func.span,
+                id: func.id,
+                name: func.name,
+                kind: CanonicalFuncKind::ResourceRep(mem::take(info)),
+            })),
         }
     }
 
@@ -276,8 +314,11 @@ impl<'a> Expander<'a> {
             self.component_fields_to_append
                 .push(ComponentField::Export(ComponentExport {
                     span: func.span,
+                    id: None,
+                    debug_name: None,
                     name,
                     kind: ComponentExportKind::func(func.span, id),
+                    ty: None,
                 }));
         }
         match &mut func.kind {
@@ -339,6 +380,7 @@ impl<'a> Expander<'a> {
             TypeDef::Func(f) => self.expand_func_ty(f),
             TypeDef::Component(c) => self.expand_component_ty(c),
             TypeDef::Instance(i) => self.expand_instance_ty(i),
+            TypeDef::Resource(_) => {}
         }
 
         let id = gensym::fill(field.span, &mut field.id);
@@ -348,6 +390,18 @@ impl<'a> Expander<'a> {
             TypeDef::Func(t) => t.key().insert(self, index),
             TypeDef::Component(t) => t.key().insert(self, index),
             TypeDef::Instance(t) => t.key().insert(self, index),
+            TypeDef::Resource(_) => {}
+        }
+        for name in field.exports.names.drain(..) {
+            self.component_fields_to_append
+                .push(ComponentField::Export(ComponentExport {
+                    span: field.span,
+                    id: None,
+                    debug_name: None,
+                    name,
+                    kind: ComponentExportKind::ty(field.span, id),
+                    ty: None,
+                }));
         }
     }
 
@@ -424,6 +478,7 @@ impl<'a> Expander<'a> {
                         name: None,
                         def: key.to_def(item.span),
                         parent: None,
+                        final_type: None,
                     }));
                     let idx = Index::Id(id);
                     t.index = Some(idx);
@@ -500,11 +555,6 @@ impl<'a> Expander<'a> {
                     self.expand_component_val_ty(field);
                 }
             }
-            ComponentDefinedType::Union(u) => {
-                for ty in u.types.iter_mut() {
-                    self.expand_component_val_ty(ty);
-                }
-            }
             ComponentDefinedType::Option(t) => {
                 self.expand_component_val_ty(&mut t.element);
             }
@@ -517,6 +567,7 @@ impl<'a> Expander<'a> {
                     self.expand_component_val_ty(ty);
                 }
             }
+            ComponentDefinedType::Own(_) | ComponentDefinedType::Borrow(_) => {}
         }
     }
 

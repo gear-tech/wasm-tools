@@ -23,7 +23,9 @@
 
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use wasmparser::*;
@@ -35,6 +37,10 @@ use wast::{parser, QuoteWat, Wast, WastDirective, Wat};
 fn main() {
     let tests = find_tests();
     let filter = std::env::args().nth(1);
+    let bless = std::env::var_os("BLESS").is_some();
+    if bless {
+        drop(std::fs::remove_dir_all("tests/snapshots"));
+    }
 
     let tests = tests
         .par_iter()
@@ -60,7 +66,14 @@ fn main() {
     let state = TestState::default();
     let errors = tests
         .par_iter()
-        .filter_map(|(test, contents)| state.run_test(test, contents).err())
+        .filter_map(|(test, contents)| {
+            let start = std::time::Instant::now();
+            let result = state.run_test(test, contents).err();
+            if start.elapsed().as_secs() > 2 {
+                println!("{test:?} SLOW");
+            }
+            result
+        })
         .collect::<Vec<_>>();
 
     if !errors.is_empty() {
@@ -81,7 +94,12 @@ fn main() {
 /// then load up and test in parallel.
 fn find_tests() -> Vec<PathBuf> {
     let mut tests = Vec::new();
-    if !Path::new("tests/testsuite").exists() {
+    let test_suite = Path::new("tests/testsuite");
+    if !test_suite.exists()
+        || std::fs::read_dir(test_suite)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    {
         panic!("submodules need to be checked out");
     }
     find_tests("tests/local".as_ref(), &mut tests);
@@ -124,21 +142,11 @@ fn skip_test(test: &Path, contents: &[u8]) -> bool {
         "exception-handling/try_delegate.wast",
         "exception-handling/try_catch.wast",
         "exception-handling/throw.wast",
-        // TODO: The call_ref instructions formats changed: the testsuite needs
-        // to be updated. Remove local/function-references/call_ref/ as well.
-        "function-references/br_on_non_null.wast",
-        "function-references/br_on_null.wast",
-        "function-references/call_ref.wast",
-        "function-references/func_bind.wast",
-        "function-references/ref_as_non_null.wast",
-        "function-references/return_call_ref.wast",
+        // This is an empty file which currently doesn't parse
+        "multi-memory/memory_copy1.wast",
     ];
-    if broken.iter().any(|x| test.ends_with(x)) {
-        return true;
-    }
-
-    // TODO: the gc proposal isn't implemented yet
-    if test.iter().any(|p| p == "gc") {
+    let test_path = test.to_str().unwrap().replace("\\", "/"); // for windows paths
+    if broken.iter().any(|x| test_path.contains(x)) {
         return true;
     }
 
@@ -152,6 +160,43 @@ fn skip_test(test: &Path, contents: &[u8]) -> bool {
         if contents.contains("STDIN_FILE") {
             return true;
         }
+    }
+
+    false
+}
+
+fn skip_validation(test: &Path) -> bool {
+    let broken = &[
+        "gc/gc-array.wat",
+        "gc/gc-rec-sub.wat",
+        "gc/gc-struct.wat",
+        "/proposals/gc/array.wast",
+        "/proposals/gc/array_copy.wast",
+        "/proposals/gc/array_fill.wast",
+        "/proposals/gc/array_init_data.wast",
+        "/proposals/gc/array_init_elem.wast",
+        "/proposals/gc/binary-gc.wast",
+        "/proposals/gc/br_on_cast.wast",
+        "/proposals/gc/br_on_cast_fail.wast",
+        "/proposals/gc/data.wast",
+        "/proposals/gc/elem.wast",
+        "/proposals/gc/extern.wast",
+        "/proposals/gc/global.wast",
+        "/proposals/gc/i31.wast",
+        "/proposals/gc/ref_cast.wast",
+        "/proposals/gc/ref_eq.wast",
+        "/proposals/gc/ref_test.wast",
+        "/proposals/gc/struct.wast",
+        "/proposals/gc/type-equivalence.wast",
+        "/proposals/gc/type-rec.wast",
+        "/proposals/gc/type-subtyping.wast",
+        "/exnref/exnref.wast",
+        "/exnref/throw_ref.wast",
+        "/exnref/try_table.wast",
+    ];
+    let test_path = test.to_str().unwrap().replace("\\", "/"); // for windows paths
+    if broken.iter().any(|x| test_path.contains(x)) {
+        return true;
     }
 
     false
@@ -177,6 +222,11 @@ impl TestState {
         // wasm file.
         let binary = wat::parse_file(test)?;
         self.bump_ntests();
+
+        if skip_validation(test) {
+            return Ok(());
+        }
+
         self.test_wasm(test, &binary, true)
             .context("failed testing the binary output of `wat`")?;
         Ok(())
@@ -189,6 +239,10 @@ impl TestState {
         // Test that we can print these bytes.
         let string = wasmprinter::print_bytes(contents).context("failed to print wasm")?;
         self.bump_ntests();
+        // Snapshot these bytes.
+        self.snapshot("print", test, &string)
+            .context("failed to validate the `print` snapshot")?;
+        self.bump_ntests();
 
         // If we can, convert the string back to bytes and assert it has the
         // same binary representation.
@@ -198,6 +252,36 @@ impl TestState {
             self.bump_ntests();
             self.binary_compare(&binary2, contents)
                 .context("failed to compare original `wat` with roundtrip `wat`")?;
+        }
+
+        // Test that the `wasmprinter`-printed bytes have "pretty" whitespace
+        // which means that all whitespace is either categorized as leading
+        // whitespace or a single space. Examples of "bad whitespace" are:
+        //
+        // * trailing whitespace at the end of a line
+        // * two spaces in a row
+        //
+        // Both of these cases indicate possible bugs in `wasmprinter` itself
+        // which while they don't actually affect the meaning they do "affect"
+        // humans reading the output.
+        for token in wast::lexer::Lexer::new(&string)
+            .allow_confusing_unicode(true)
+            .iter(0)
+        {
+            let token = token?;
+            let ws = match token.kind {
+                wast::lexer::TokenKind::Whitespace => token.src(&string),
+                _ => continue,
+            };
+            if ws.starts_with("\n") || ws == " " {
+                continue;
+            }
+            let offset = ws.as_ptr() as usize - string.as_ptr() as usize;
+            let span = wast::token::Span::from_offset(offset);
+            let msg = format!("found non-one-length whitespace in `wasmprinter` output: {ws:?}");
+            let mut err = wast::Error::new(span, msg);
+            err.set_text(&string);
+            return Err(err.into());
         }
 
         Ok(())
@@ -222,9 +306,10 @@ impl TestState {
         let errors = wast
             .directives
             .into_par_iter()
-            .filter_map(|directive| {
+            .enumerate()
+            .filter_map(|(index, directive)| {
                 let span = directive.span();
-                self.test_wast_directive(test, directive)
+                self.test_wast_directive(test, directive, index)
                     .with_context(|| {
                         let (line, col) = span.linecol_in(contents);
                         format!(
@@ -252,18 +337,17 @@ impl TestState {
         bail!("{}", s)
     }
 
-    fn test_wast_directive(&self, test: &Path, directive: WastDirective) -> Result<()> {
-        // Only test parsing and encoding of modules which wasmparser doesn't
-        // support test (basically just test `wast`, nothing else)
-        let skip_verify = test.iter().any(|t| t == "function-references" || t == "gc");
-
+    fn test_wast_directive(&self, test: &Path, directive: WastDirective, idx: usize) -> Result<()> {
         match directive {
             WastDirective::Wat(mut module) => {
                 let actual = module.encode()?;
                 self.bump_ntests(); // testing encode
-                if skip_verify {
+
+                if skip_validation(test) {
+                    // Verify that we can parse the wat, but otherwise do nothing.
                     return Ok(());
                 }
+
                 let test_roundtrip = match module {
                     // Don't test the wasmprinter round trip since these bytes
                     // may not be in their canonical form (didn't come from the
@@ -275,7 +359,11 @@ impl TestState {
 
                     _ => true,
                 };
-                self.test_wasm(test, &actual, test_roundtrip)
+
+                let mut test_path = test.to_path_buf();
+                test_path.push(idx.to_string());
+
+                self.test_wasm(&test_path, &actual, test_roundtrip)
                     .context("failed testing wasm binary produced by `wast`")?;
             }
 
@@ -289,6 +377,10 @@ impl TestState {
                 message,
                 span: _,
             } => {
+                if skip_validation(test) {
+                    return Ok(());
+                }
+
                 let result = module.encode().map_err(|e| e.into()).and_then(|wasm| {
                     // TODO: when memory64 merges into the proper spec then this
                     // should be removed since it will presumably no longer be a
@@ -310,12 +402,9 @@ impl TestState {
 
                     self.test_wasm_valid(test, &wasm)
                 });
-                if skip_verify {
-                    return Ok(());
-                }
                 match result {
                     Ok(_) => bail!(
-                        "parsed successfully but should have failed with: {}",
+                        "encoded and validated successfully but should have failed with: {}",
                         message,
                     ),
                     Err(e) => {
@@ -328,6 +417,12 @@ impl TestState {
                 }
             }
 
+            WastDirective::Thread(thread) => {
+                for (i, directive) in thread.directives.into_iter().enumerate() {
+                    self.test_wast_directive(test, directive, idx * 1000 + i)?;
+                }
+            }
+
             // This test suite doesn't actually execute any wasm code, so ignore
             // all of these assertions.
             WastDirective::Register { .. }
@@ -336,7 +431,8 @@ impl TestState {
             | WastDirective::AssertReturn { .. }
             | WastDirective::AssertExhaustion { .. }
             | WastDirective::AssertUnlinkable { .. }
-            | WastDirective::AssertException { .. } => {}
+            | WastDirective::AssertException { .. }
+            | WastDirective::Wait { .. } => {}
         }
         Ok(())
     }
@@ -344,6 +440,67 @@ impl TestState {
     fn test_wasm_valid(&self, test: &Path, contents: &[u8]) -> Result<()> {
         self.wasmparser_validator_for(test).validate_all(contents)?;
         self.bump_ntests();
+        Ok(())
+    }
+
+    /// Compare the test result with a snapshot stored in the repository.
+    ///
+    /// Works great for tools like wasmprinter for which having a nice overview of what effect the
+    /// changes cause.
+    fn snapshot(&self, kind: &str, path: &Path, contents: &str) -> Result<()> {
+        let contents = contents.replace("\r\n", "\n");
+        let bless = std::env::var_os("BLESS").is_some();
+        let snapshot_dir = ["tests", "snapshots"]
+            .into_iter()
+            .collect::<std::path::PathBuf>();
+        let test_name = path
+            .iter()
+            .skip_while(|&c| c != std::ffi::OsStr::new("tests"))
+            .skip(1)
+            .collect::<std::path::PathBuf>();
+        let mut snapshot_name = test_name.into_os_string();
+        snapshot_name.push(".");
+        snapshot_name.push(kind);
+        let snapshot_path = snapshot_dir.join(snapshot_name);
+        if bless {
+            std::fs::create_dir_all(snapshot_path.parent().unwrap()).with_context(|| {
+                format!("could not create the snapshot dir {:?}", snapshot_path)
+            })?;
+            std::fs::write(&snapshot_path, contents).with_context(|| {
+                format!("could not write out the snapshot to {:?}", snapshot_path)
+            })?;
+        } else {
+            let snapshot = std::fs::read(snapshot_path)
+                .context("could not read the snapshot, try `env BLESS=1`")?;
+            let snapshot =
+                std::str::from_utf8(&snapshot).context("can't decode snapshot as utf-8")?;
+            // Handle git possibly doing some newline shenanigans on windows.
+            let snapshot = snapshot.replace("\r\n", "\n");
+            if snapshot != contents {
+                let mut result = String::with_capacity(snapshot.len());
+                for diff in diff::lines(&snapshot, &contents) {
+                    match diff {
+                        diff::Result::Left(s) => {
+                            result.push_str("-");
+                            result.push_str(s);
+                        }
+                        diff::Result::Right(s) => {
+                            result.push_str("+");
+                            result.push_str(s);
+                        }
+                        diff::Result::Both(s, _) => {
+                            result.push_str(" ");
+                            result.push_str(s);
+                        }
+                    }
+                    result.push_str("\n");
+                }
+                anyhow::bail!(
+                    "snapshot does not match the expected result, try `env BLESS=1`\n{}",
+                    result
+                );
+            }
+        }
         Ok(())
     }
 
@@ -375,8 +532,8 @@ impl TestState {
             msg.push_str(&format!("       | + {:#04x}\n", actual[pos]));
         }
 
-        if let Ok(actual) = wasmparser_dump::dump_wasm(&actual) {
-            if let Ok(expected) = wasmparser_dump::dump_wasm(&expected) {
+        if let Ok(actual) = self.dump(&actual) {
+            if let Ok(expected) = self.dump(&expected) {
                 let mut actual = actual.lines();
                 let mut expected = expected.lines();
                 let mut differences = 0;
@@ -413,6 +570,21 @@ impl TestState {
         bail!("{}", msg);
     }
 
+    fn dump(&self, bytes: &[u8]) -> Result<String> {
+        let mut dump = Command::new(env!("CARGO_BIN_EXE_wasm-tools"))
+            .arg("dump")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        dump.stdin.take().unwrap().write_all(bytes)?;
+        let mut stdout = String::new();
+        dump.stdout.take().unwrap().read_to_string(&mut stdout)?;
+        if dump.wait()?.success() {
+            bail!("dump subcommand failed");
+        }
+        Ok(stdout)
+    }
+
     fn wasmparser_validator_for(&self, test: &Path) -> Validator {
         let mut features = WasmFeatures {
             threads: true,
@@ -423,7 +595,7 @@ impl TestState {
             bulk_memory: true,
             tail_call: true,
             component_model: false,
-            deterministic_only: false,
+            floats: true,
             multi_value: true,
             multi_memory: true,
             memory64: true,
@@ -431,10 +603,23 @@ impl TestState {
             saturating_float_to_int: true,
             sign_extension: true,
             mutable_global: true,
+            function_references: true,
+            memory_control: true,
+            gc: true,
+            component_model_values: true,
         };
         for part in test.iter().filter_map(|t| t.to_str()) {
             match part {
-                "testsuite" => features = WasmFeatures::default(),
+                "testsuite" => {
+                    features = WasmFeatures::default();
+
+                    // NB: when these proposals are merged upstream in the spec
+                    // repo then this should be removed. Currently this hasn't
+                    // happened so this is required to get tests passing for
+                    // when these proposals are enabled by default.
+                    features.multi_memory = false;
+                    features.threads = false;
+                }
                 "missing-features" => {
                     features = WasmFeatures::default();
                     features.simd = false;
@@ -444,7 +629,11 @@ impl TestState {
                     features.saturating_float_to_int = false;
                     features.mutable_global = false;
                     features.bulk_memory = false;
+                    features.function_references = false;
+                    features.gc = false;
+                    features.component_model_values = false;
                 }
+                "floats-disabled.wast" => features.floats = false,
                 "threads" => {
                     features.threads = true;
                     features.bulk_memory = false;
@@ -460,6 +649,13 @@ impl TestState {
                 "component-model" => features.component_model = true,
                 "multi-memory" => features.multi_memory = true,
                 "extended-const" => features.extended_const = true,
+                "function-references" => features.function_references = true,
+                "relaxed-simd" => features.relaxed_simd = true,
+                "reference-types" => features.reference_types = true,
+                "gc" => {
+                    features.function_references = true;
+                    features.gc = true;
+                }
                 _ => {}
             }
         }
@@ -570,10 +766,16 @@ fn error_matches(error: &str, message: &str) -> bool {
     // section counts/lengths.
     if message == "length out of bounds" || message == "unexpected end of section or function" {
         return error.contains("unexpected end-of-file")
-            || error.contains("control frames remain at end of function");
+            || error.contains("control frames remain at end of function")
+            // This is the same case as "unexpected end" (below) but in
+            // function-references fsr it includes "of section or function"
+            || error.contains("type index out of bounds");
     }
 
-    // this feels like a busted test in the spec suite
+    // binary.wast includes a test in which a 0b (End) is eaten by a botched
+    // br_table.  The test assumes that the parser (not the validator) errors on
+    // a missing End before failing to validate the botched instruction.  However
+    // wasmparser fails to validate the botched instruction first
     if message == "unexpected end" {
         return error.contains("type index out of bounds");
     }
@@ -600,6 +802,31 @@ fn error_matches(error: &str, message: &str) -> bool {
     // the text file, not a validation error of the binary.
     if message == "memory size must be at most 65536 pages (4GiB)" {
         return error.contains("invalid u32 number: constant out of range");
+    }
+
+    if message == "illegal opcode" {
+        // The test suite includes "bad opcodes" that later became valid opcodes
+        // (0xd4, function references proposal). However, they are still not
+        // constant expressions, so we can sidestep by checking for that error
+        // instead
+        return error.contains("constant expression required")
+            // The test suite contains a test with a global section where the
+            // init expression is truncated and doesn't have an "end"
+            // instruction. That's reported with wasmparser as end-of-file
+            // because the end of the section was reached while the spec
+            // interpreter says "illegal opcode".
+            || error.contains("unexpected end-of-file");
+    }
+    if message == "unknown global" {
+        return error.contains("global.get of locally defined global");
+    }
+
+    if message == "immutable global" {
+        return error.contains("global is immutable");
+    }
+
+    if message == "sub type" {
+        return error.contains("subtype");
     }
 
     return false;

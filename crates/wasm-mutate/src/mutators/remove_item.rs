@@ -7,6 +7,7 @@
 //! mutator largely translates between `wasmparser` structures and
 //! `wasm_encoder` structures.
 
+use crate::mutators::translate::ConstExprKind;
 use crate::mutators::{translate, Item, Mutator, Translator};
 use crate::Error;
 use crate::{ModuleInfo, Result, WasmMutate};
@@ -15,8 +16,8 @@ use std::collections::HashSet;
 use wasm_encoder::*;
 use wasmparser::{
     BinaryReader, CodeSectionReader, DataSectionReader, ElementSectionReader, ExportSectionReader,
-    ExternalKind, FunctionSectionReader, GlobalSectionReader, ImportSectionReader,
-    MemorySectionReader, Operator, SectionReader, TableSectionReader, TagSectionReader,
+    ExternalKind, FromReader, FunctionSectionReader, GlobalSectionReader, ImportSectionReader,
+    MemorySectionReader, Operator, TableInit, TableSectionReader, TagSectionReader,
     TypeSectionReader,
 };
 
@@ -31,12 +32,9 @@ impl Mutator for RemoveItemMutator {
     }
 
     fn mutate<'a>(
-        self,
+        &self,
         config: &'a mut WasmMutate,
-    ) -> Result<Box<dyn Iterator<Item = Result<wasm_encoder::Module>> + 'a>>
-    where
-        Self: Copy,
-    {
+    ) -> Result<Box<dyn Iterator<Item = Result<wasm_encoder::Module>> + 'a>> {
         let idx = self.0.choose_removal_index(config);
         log::trace!("attempting to remove {:?} index {}", self.0, idx);
 
@@ -136,9 +134,12 @@ impl RemoveItem {
                     self.filter_out(
                         &mut module,
                         0,
-                        TypeSectionReader::new(section.data, 0)?,
+                        TypeSectionReader::new(section.data, 0)?.into_iter_err_on_gc_types(),
                         Item::Type,
-                        |me, ty, section| me.translate_type_def(ty, section),
+                        |me, ty, section| {
+                            me.translate_func_type(ty,section)?;
+                            Ok(())
+                        },
                     )?;
                 },
 
@@ -216,9 +217,21 @@ impl RemoveItem {
                         info.num_imported_tables(),
                         TableSectionReader::new(section.data, 0)?,
                         Item::Table,
-                        |me, ty, section: &mut TableSection| {
-                            let ty = me.translate_table_type(&ty)?;
-                            section.table(ty);
+                        |me, table, section: &mut TableSection| {
+                            let ty = me.translate_table_type(&table.ty)?;
+                            match &table.init {
+                                TableInit::RefNull => {
+                                    section.table(ty);
+                                }
+                                TableInit::Expr(expr) => {
+                                    let init = me.translate_const_expr(
+                                        expr,
+                                        &table.ty.element_type.into(),
+                                        ConstExprKind::TableInit,
+                                    )?;
+                                    section.table_with_init(ty, &init);
+                                }
+                            }
                             Ok(())
                         },
                     )?;
@@ -359,22 +372,22 @@ impl RemoveItem {
     /// The `offset` provided is the initial offset in the index space, for
     /// example the global section starts at the offset equal to the number of
     /// imported globals because local globals are numbered afterwards.
-    fn filter_out<S, T>(
+    fn filter_out<'a, S, T>(
         &mut self,
         module: &mut Module,
         offset: u32,
-        mut section: S,
+        section: impl IntoIterator<Item = wasmparser::Result<S>>,
         section_item: Item,
-        encode: impl Fn(&mut Self, S::Item, &mut T) -> Result<()>,
+        encode: impl Fn(&mut Self, S, &mut T) -> Result<()>,
     ) -> Result<()>
     where
-        S: SectionReader,
+        S: FromReader<'a>,
         T: Default + Section,
     {
         let mut result = T::default();
         let mut index = offset;
-        while !section.eof() {
-            let item = section.read()?;
+        for item in section {
+            let item = item?;
             if index != self.idx || section_item != self.item {
                 encode(self, item, &mut result)?;
             }
@@ -417,11 +430,8 @@ impl Translator for RemoveItem {
             }
         }
 
-        if item != self.item {
-            // Different kind of item, no change
-            Ok(idx)
-        } else if idx < self.idx {
-            // A later item was removed, so this index doesn't change
+        if item != self.item || idx < self.idx {
+            // Different kind of item or a later item was removed, index doesn't change
             Ok(idx)
         } else if idx == self.idx {
             // If we're removing a referenced item then that means that this
@@ -539,7 +549,7 @@ mod tests {
     #[test]
     fn remove_elem() {
         crate::mutators::match_mutation(
-            r#"(module (elem))"#,
+            r#"(module (elem funcref))"#,
             RemoveItemMutator(Item::Element),
             r#"(module)"#,
         );

@@ -1,6 +1,6 @@
 (component
-  (import "wasi:logging" (instance $logging
-    (export "log" (func (param string)))
+  (import "wasi-logging" (instance $logging
+    (export "log" (func (param "msg" string)))
   ))
   (import "libc" (core module $Libc
     (export "memory" (memory 1))
@@ -14,7 +14,7 @@
   (core module $Main
     (import "libc" "memory" (memory 1))
     (import "libc" "realloc" (func (param i32 i32 i32 i32) (result i32)))
-    (import "wasi:logging" "log" (func $log (param i32 i32)))
+    (import "wasi-logging" "log" (func $log (param i32 i32)))
     (func (export "run") (param i32 i32) (result i32)
       (local.get 0)
       (local.get 1)
@@ -24,9 +24,9 @@
   )
   (core instance $main (instantiate $Main
     (with "libc" (instance $libc))
-    (with "wasi:logging" (instance (export "log" (func $log))))
+    (with "wasi-logging" (instance (export "log" (func $log))))
   ))
-  (func $run (param string) (result string) (canon lift
+  (func $run (param "in" string) (result string) (canon lift
     (core func $main "run")
     (memory $libc "memory") (realloc (func $libc "realloc"))
   ))

@@ -152,13 +152,13 @@ impl Module {
                         // TODO(nagisa): generate global.get of imported ref globals too.
                         match e {
                             Some(i) => match el.ty {
-                                ValType::FuncRef => wasm_encoder::ConstExpr::ref_func(*i),
+                                RefType::FUNCREF => wasm_encoder::ConstExpr::ref_func(*i),
                                 _ => unreachable!(),
                             },
-                            None => wasm_encoder::ConstExpr::ref_null(el.ty),
+                            None => wasm_encoder::ConstExpr::ref_null(el.ty.heap_type),
                         }
                     }));
-                    wasm_encoder::Elements::Expressions(&exps)
+                    wasm_encoder::Elements::Expressions(el.ty, &exps)
                 }
                 Elements::Functions(fs) => wasm_encoder::Elements::Functions(fs),
             };
@@ -169,13 +169,13 @@ impl Module {
                         Offset::Const64(n) => ConstExpr::i64_const(n),
                         Offset::Global(g) => ConstExpr::global_get(g),
                     };
-                    elems.active(*table, &offset, el.ty, elements);
+                    elems.active(*table, &offset, elements);
                 }
                 ElementKind::Passive => {
-                    elems.passive(el.ty, elements);
+                    elems.passive(elements);
                 }
                 ElementKind::Declared => {
-                    elems.declared(el.ty, elements);
+                    elems.declared(elements);
                 }
             }
         }

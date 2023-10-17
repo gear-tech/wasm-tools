@@ -14,8 +14,8 @@
  */
 
 use crate::{
-    limits::*, BinaryReaderError, Encoding, FunctionBody, Parser, Payload, Result, SectionReader,
-    SectionWithLimitedItems, ValType, WASM_COMPONENT_VERSION, WASM_MODULE_VERSION,
+    limits::*, BinaryReaderError, Encoding, FromReader, FunctionBody, HeapType, Parser, Payload,
+    Result, SectionLimited, ValType, WASM_COMPONENT_VERSION, WASM_MODULE_VERSION,
 };
 use std::mem;
 use std::ops::Range;
@@ -48,13 +48,14 @@ fn test_validate() {
 mod component;
 mod core;
 mod func;
+pub mod names;
 mod operators;
 pub mod types;
 
 use self::component::*;
 pub use self::core::ValidatorResources;
 use self::core::*;
-use self::types::{TypeList, Types, TypesRef};
+use self::types::{TypeAlloc, Types, TypesRef};
 pub use func::{FuncToValidate, FuncValidator, FuncValidatorAllocations};
 pub use operators::{Frame, FrameKind};
 
@@ -74,7 +75,7 @@ fn check_max(cur_len: usize, amt_added: u32, max: usize, desc: &str, offset: usi
     Ok(())
 }
 
-fn combine_type_sizes(a: usize, b: usize, offset: usize) -> Result<usize> {
+fn combine_type_sizes(a: u32, b: u32, offset: usize) -> Result<u32> {
     match a.checked_add(b) {
         Some(sum) if sum < MAX_WASM_TYPE_SIZE => Ok(sum),
         _ => Err(format_err!(
@@ -115,7 +116,7 @@ pub struct Validator {
     state: State,
 
     /// The global type space used by the validator and any sub-validators.
-    types: TypeList,
+    types: TypeAlloc,
 
     /// The module state when parsing a WebAssembly module.
     module: Option<ModuleState>,
@@ -211,17 +212,26 @@ pub struct WasmFeatures {
     pub multi_value: bool,
     /// The WebAssembly bulk memory operations proposal (enabled by default)
     pub bulk_memory: bool,
-    /// The WebAssembly SIMD proposal
+    /// The WebAssembly SIMD proposal (enabled by default)
     pub simd: bool,
-    /// The WebAssembly Relaxed SIMD proposal
+    /// The WebAssembly Relaxed SIMD proposal (enabled by default)
     pub relaxed_simd: bool,
-    /// The WebAssembly threads proposal
+    /// The WebAssembly threads proposal (enabled by default)
     pub threads: bool,
-    /// The WebAssembly tail-call proposal
+    /// The WebAssembly tail-call proposal (enabled by default)
     pub tail_call: bool,
-    /// Whether or not only deterministic instructions are allowed
-    pub deterministic_only: bool,
-    /// The WebAssembly multi memory proposal
+    /// Whether or not floating-point instructions are enabled.
+    ///
+    /// This is enabled by default can be used to disallow floating-point
+    /// operators and types.
+    ///
+    /// This does not correspond to a WebAssembly proposal but is instead
+    /// intended for embeddings which have stricter-than-usual requirements
+    /// about execution. Floats in WebAssembly can have different NaN patterns
+    /// across hosts which can lead to host-dependent execution which some
+    /// runtimes may not desire.
+    pub floats: bool,
+    /// The WebAssembly multi memory proposal (enabled by default)
     pub multi_memory: bool,
     /// The WebAssembly exception handling proposal
     pub exceptions: bool,
@@ -231,17 +241,102 @@ pub struct WasmFeatures {
     pub extended_const: bool,
     /// The WebAssembly component model proposal.
     pub component_model: bool,
+    /// The WebAssembly typed function references proposal
+    pub function_references: bool,
+    /// The WebAssembly memory control proposal
+    pub memory_control: bool,
+    /// The WebAssembly gc proposal
+    pub gc: bool,
+    /// Support for the `value` type in the component model proposal.
+    pub component_model_values: bool,
 }
 
 impl WasmFeatures {
+    /// Returns [`WasmFeatures`] with all features enabled.
+    pub fn all() -> Self {
+        WasmFeatures {
+            mutable_global: true,
+            saturating_float_to_int: true,
+            sign_extension: true,
+            reference_types: true,
+            multi_value: true,
+            bulk_memory: true,
+            simd: true,
+            relaxed_simd: true,
+            threads: true,
+            tail_call: true,
+            floats: true,
+            multi_memory: true,
+            exceptions: true,
+            memory64: true,
+            extended_const: true,
+            component_model: true,
+            function_references: true,
+            memory_control: true,
+            gc: true,
+            component_model_values: true,
+        }
+    }
+
+    /// NOTE: This only checks that the value type corresponds to the feature set!!
+    ///
+    /// To check that reference types are valid, we need access to the module
+    /// types. Use module.check_value_type.
     pub(crate) fn check_value_type(&self, ty: ValType) -> Result<(), &'static str> {
         match ty {
-            ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 => Ok(()),
-            ValType::FuncRef | ValType::ExternRef => {
-                if self.reference_types {
+            ValType::I32 | ValType::I64 => Ok(()),
+            ValType::F32 | ValType::F64 => {
+                if self.floats {
                     Ok(())
                 } else {
-                    Err("reference types support is not enabled")
+                    Err("floating-point support is disabled")
+                }
+            }
+            ValType::Ref(r) => {
+                if !self.reference_types {
+                    return Err("reference types support is not enabled");
+                }
+                match (r.heap_type(), r.is_nullable()) {
+                    // funcref/externref only require `reference-types`
+                    (HeapType::Func, true) | (HeapType::Extern, true) => Ok(()),
+
+                    // non-nullable func/extern references requires the
+                    // `function-references` proposal
+                    (HeapType::Func | HeapType::Extern, false) => {
+                        if self.function_references {
+                            Ok(())
+                        } else {
+                            Err("function references required for non-nullable types")
+                        }
+                    }
+                    // indexed types require at least the function-references
+                    // proposal
+                    (HeapType::Indexed(_), _) => {
+                        if self.function_references {
+                            Ok(())
+                        } else {
+                            Err("function references required for index reference types")
+                        }
+                    }
+
+                    // types added in the gc proposal
+                    (
+                        HeapType::Any
+                        | HeapType::None
+                        | HeapType::Eq
+                        | HeapType::Struct
+                        | HeapType::Array
+                        | HeapType::I31
+                        | HeapType::NoExtern
+                        | HeapType::NoFunc,
+                        _,
+                    ) => {
+                        if self.gc {
+                            Ok(())
+                        } else {
+                            Err("heap types not supported without the gc feature")
+                        }
+                    }
                 }
             }
             ValType::V128 => {
@@ -258,25 +353,29 @@ impl WasmFeatures {
 impl Default for WasmFeatures {
     fn default() -> WasmFeatures {
         WasmFeatures {
-            // off-by-default features
-            relaxed_simd: false,
-            threads: false,
-            tail_call: false,
-            multi_memory: false,
+            // Off-by-default features.
             exceptions: false,
             memory64: false,
             extended_const: false,
             component_model: false,
-            deterministic_only: cfg!(feature = "deterministic"),
+            function_references: false,
+            memory_control: false,
+            gc: false,
+            component_model_values: false,
 
-            // on-by-default features
+            // On-by-default features (phase 4 or greater).
             mutable_global: true,
             saturating_float_to_int: true,
             sign_extension: true,
             bulk_memory: true,
             multi_value: true,
             reference_types: true,
+            tail_call: true,
             simd: true,
+            floats: true,
+            relaxed_simd: true,
+            threads: true,
+            multi_memory: true,
         }
     }
 }
@@ -426,7 +525,7 @@ impl Validator {
             } => self.code_section_start(*count, range)?,
             CodeSectionEntry(body) => {
                 let func_validator = self.code_section_entry(body)?;
-                return Ok(ValidPayload::Func(func_validator, *body));
+                return Ok(ValidPayload::Func(func_validator, body.clone()));
             }
             DataSection(s) => self.data_section(s)?,
 
@@ -445,7 +544,7 @@ impl Validator {
             ComponentAliasSection(s) => self.component_alias_section(s)?,
             ComponentTypeSection(s) => self.component_type_section(s)?,
             ComponentCanonicalSection(s) => self.component_canonical_section(s)?,
-            ComponentStartSection(s) => self.component_start_section(s)?,
+            ComponentStartSection { start, range } => self.component_start_section(start, range)?,
             ComponentImportSection(s) => self.component_import_section(s)?,
             ComponentExportSection(s) => self.component_export_section(s)?,
 
@@ -458,7 +557,7 @@ impl Validator {
     }
 
     /// Validates [`Payload::Version`](crate::Payload).
-    pub fn version(&mut self, num: u32, encoding: Encoding, range: &Range<usize>) -> Result<()> {
+    pub fn version(&mut self, num: u16, encoding: Encoding, range: &Range<usize>) -> Result<()> {
         match &self.state {
             State::Unparsed(expected) => {
                 if let Some(expected) = expected {
@@ -482,28 +581,34 @@ impl Validator {
             }
         }
 
-        self.state = match (encoding, num) {
-            (Encoding::Module, WASM_MODULE_VERSION) => {
-                assert!(self.module.is_none());
-                self.module = Some(ModuleState::default());
-                State::Module
-            }
-            (Encoding::Component, WASM_COMPONENT_VERSION) => {
-                if !self.features.component_model {
-                    return Err(BinaryReaderError::new(
-                        "WebAssembly component model feature not enabled",
-                        range.start,
-                    ));
+        self.state = match encoding {
+            Encoding::Module => {
+                if num == WASM_MODULE_VERSION {
+                    assert!(self.module.is_none());
+                    self.module = Some(ModuleState::default());
+                    State::Module
+                } else {
+                    bail!(range.start, "unknown binary version: {num:#x}");
                 }
-
-                self.components.push(ComponentState::default());
-                State::Component
             }
-            _ => {
-                return Err(BinaryReaderError::new(
-                    "unknown binary version",
-                    range.start,
-                ));
+            Encoding::Component => {
+                if !self.features.component_model {
+                    bail!(
+                        range.start,
+                        "unknown binary version and encoding combination: {num:#x} and 0x1, \
+                        note: encoded as a component but the WebAssembly component model feature \
+                        is not enabled - enable the feature to allow component validation",
+                    );
+                }
+                if num == WASM_COMPONENT_VERSION {
+                    self.components
+                        .push(ComponentState::new(ComponentKind::Component));
+                    State::Component
+                } else if num < WASM_COMPONENT_VERSION {
+                    bail!(range.start, "unsupported component version: {num:#x}");
+                } else {
+                    bail!(range.start, "unknown component version: {num:#x}");
+                }
             }
         };
 
@@ -532,7 +637,8 @@ impl Validator {
                 state
                     .module
                     .assert_mut()
-                    .add_type(def, features, types, offset, false /* checked above */)
+                    .add_types(&def, features, types, offset, true)?;
+                Ok(())
             },
         )
     }
@@ -600,9 +706,7 @@ impl Validator {
                 state.module.assert_mut().tables.reserve(count as usize);
                 Ok(())
             },
-            |state, features, _, ty, offset| {
-                state.module.assert_mut().add_table(ty, features, offset)
-            },
+            |state, features, types, table, offset| state.add_table(table, features, types, offset),
         )
     }
 
@@ -710,10 +814,13 @@ impl Validator {
                 state.module.assert_mut().exports.reserve(count as usize);
                 Ok(())
             },
-            |state, features, _, e, offset| {
+            |state, features, types, e, offset| {
                 let state = state.module.assert_mut();
                 let ty = state.export_to_entity_type(&e, offset)?;
-                state.add_export(e.name, ty, features, offset, false /* checked above */)
+                state.add_export(
+                    e.name, ty, features, offset, false, /* checked above */
+                    types,
+                )
             },
         )
     }
@@ -988,11 +1095,11 @@ impl Validator {
                 current.instances.reserve(count as usize);
                 Ok(())
             },
-            |components, types, _, instance, offset| {
+            |components, types, features, instance, offset| {
                 components
                     .last_mut()
                     .unwrap()
-                    .add_instance(instance, types, offset)
+                    .add_instance(instance, features, types, offset)
             },
         )
     }
@@ -1002,14 +1109,14 @@ impl Validator {
     /// This method should only be called when parsing a component.
     pub fn component_alias_section(
         &mut self,
-        section: &crate::ComponentAliasSectionReader,
+        section: &crate::ComponentAliasSectionReader<'_>,
     ) -> Result<()> {
         self.process_component_section(
             section,
             "alias",
             |_, _, _, _| Ok(()), // maximums checked via `add_alias`
-            |components, types, _, alias, offset| -> Result<(), BinaryReaderError> {
-                ComponentState::add_alias(components, alias, types, offset)
+            |components, types, features, alias, offset| -> Result<(), BinaryReaderError> {
+                ComponentState::add_alias(components, alias, features, types, offset)
             },
         )
     }
@@ -1079,6 +1186,15 @@ impl Validator {
                         func_index,
                         options,
                     } => current.lower_function(func_index, options.into_vec(), types, offset),
+                    crate::CanonicalFunction::ResourceNew { resource } => {
+                        current.resource_new(resource, types, offset)
+                    }
+                    crate::CanonicalFunction::ResourceDrop { resource } => {
+                        current.resource_drop(resource, types, offset)
+                    }
+                    crate::CanonicalFunction::ResourceRep { resource } => {
+                        current.resource_rep(resource, types, offset)
+                    }
                 }
             },
         )
@@ -1089,25 +1205,16 @@ impl Validator {
     /// This method should only be called when parsing a component.
     pub fn component_start_section(
         &mut self,
-        section: &crate::ComponentStartSectionReader,
+        f: &crate::ComponentStartFunction,
+        range: &Range<usize>,
     ) -> Result<()> {
-        let range = section.range();
         self.state.ensure_component("start", range.start)?;
-
-        let mut section = section.clone();
-        let f = section.read()?;
-
-        if !section.eof() {
-            return Err(BinaryReaderError::new(
-                "trailing data at the end of the start section",
-                section.original_position(),
-            ));
-        }
 
         self.components.last_mut().unwrap().add_start(
             f.func_index,
             &f.arguments,
             f.results,
+            &self.features,
             &self.types,
             range.start,
         )
@@ -1124,11 +1231,11 @@ impl Validator {
             section,
             "import",
             |_, _, _, _| Ok(()), // add_import will check limits
-            |components, types, _, import, offset| {
+            |components, types, features, import, offset| {
                 components
                     .last_mut()
                     .unwrap()
-                    .add_import(import, types, offset)
+                    .add_import(import, features, types, offset)
             },
         )
     }
@@ -1155,10 +1262,17 @@ impl Validator {
                 current.exports.reserve(count as usize);
                 Ok(())
             },
-            |components, _, _, export, offset| {
+            |components, types, features, export, offset| {
                 let current = components.last_mut().unwrap();
-                let ty = current.export_to_entity_type(&export, offset)?;
-                current.add_export(export.name, ty, offset, false /* checked above */)
+                let ty = current.export_to_entity_type(&export, features, types, offset)?;
+                current.add_export(
+                    export.name,
+                    ty,
+                    features,
+                    types,
+                    offset,
+                    false, /* checked above */
+                )
             },
         )
     }
@@ -1204,16 +1318,18 @@ impl Validator {
 
                 // Validate that all values were used for the component
                 if let Some(index) = component.values.iter().position(|(_, used)| !*used) {
-                    return Err(
-                        format_err!(offset,"value index {index} was not used as part of an instantiation, start function, or export"
-                            )
+                    bail!(
+                        offset,
+                        "value index {index} was not used as part of an \
+                         instantiation, start function, or export"
                     );
                 }
 
                 // If there's a parent component, pop the stack, add it to the parent,
                 // and continue to validate the component
+                let ty = component.finish(&mut self.types, offset)?;
                 if let Some(parent) = self.components.last_mut() {
-                    parent.add_component(&mut component, &mut self.types);
+                    parent.add_component(ty, &mut self.types)?;
                     self.state = State::Component;
                 }
 
@@ -1222,28 +1338,28 @@ impl Validator {
         }
     }
 
-    fn process_module_section<T>(
+    fn process_module_section<'a, T>(
         &mut self,
         order: Order,
-        section: &T,
+        section: &SectionLimited<'a, T>,
         name: &str,
         validate_section: impl FnOnce(
             &mut ModuleState,
             &WasmFeatures,
-            &mut TypeList,
+            &mut TypeAlloc,
             u32,
             usize,
         ) -> Result<()>,
         mut validate_item: impl FnMut(
             &mut ModuleState,
             &WasmFeatures,
-            &mut TypeList,
-            T::Item,
+            &mut TypeAlloc,
+            T,
             usize,
         ) -> Result<()>,
     ) -> Result<()>
     where
-        T: SectionReader + Clone + SectionWithLimitedItems,
+        T: FromReader<'a>,
     {
         let offset = section.range().start;
         self.state.ensure_module(name, offset)?;
@@ -1255,37 +1371,38 @@ impl Validator {
             state,
             &self.features,
             &mut self.types,
-            section.get_count(),
+            section.count(),
             offset,
         )?;
 
-        let mut section = section.clone();
-        for _ in 0..section.get_count() {
-            let offset = section.original_position();
-            let item = section.read()?;
+        for item in section.clone().into_iter_with_offsets() {
+            let (offset, item) = item?;
             validate_item(state, &self.features, &mut self.types, item, offset)?;
         }
-
-        section.ensure_end()?;
 
         Ok(())
     }
 
-    fn process_component_section<T>(
+    fn process_component_section<'a, T>(
         &mut self,
-        section: &T,
+        section: &SectionLimited<'a, T>,
         name: &str,
-        validate_section: impl FnOnce(&mut Vec<ComponentState>, &mut TypeList, u32, usize) -> Result<()>,
+        validate_section: impl FnOnce(
+            &mut Vec<ComponentState>,
+            &mut TypeAlloc,
+            u32,
+            usize,
+        ) -> Result<()>,
         mut validate_item: impl FnMut(
             &mut Vec<ComponentState>,
-            &mut TypeList,
+            &mut TypeAlloc,
             &WasmFeatures,
-            T::Item,
+            T,
             usize,
         ) -> Result<()>,
     ) -> Result<()>
     where
-        T: Clone + SectionWithLimitedItems,
+        T: FromReader<'a>,
     {
         let offset = section.range().start;
 
@@ -1300,14 +1417,12 @@ impl Validator {
         validate_section(
             &mut self.components,
             &mut self.types,
-            section.get_count(),
+            section.count(),
             offset,
         )?;
 
-        let mut section = section.clone();
-        for _ in 0..section.get_count() {
-            let offset = section.original_position();
-            let item = section.read()?;
+        for item in section.clone().into_iter_with_offsets() {
+            let (offset, item) = item?;
             validate_item(
                 &mut self.components,
                 &mut self.types,
@@ -1317,15 +1432,13 @@ impl Validator {
             )?;
         }
 
-        section.ensure_end()?;
-
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{GlobalType, MemoryType, TableType, ValType, Validator, WasmFeatures};
+    use crate::{GlobalType, MemoryType, RefType, TableType, ValType, Validator, WasmFeatures};
     use anyhow::Result;
 
     #[test]
@@ -1363,66 +1476,122 @@ mod tests {
         assert_eq!(types.instance_count(), 0);
         assert_eq!(types.value_count(), 0);
 
-        match types.func_type_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
-                assert_eq!(ty.results(), [ValType::I32]);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types[types.core_type_at(0)].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
+        assert_eq!(ty.results(), [ValType::I32]);
 
-        match types.func_type_at(1) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
-                assert_eq!(ty.results(), []);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types[types.core_type_at(1)].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
+        assert_eq!(ty.results(), []);
 
         assert_eq!(
             types.memory_at(0),
-            Some(MemoryType {
+            MemoryType {
                 memory64: false,
                 shared: false,
                 initial: 1,
                 maximum: Some(5)
-            })
+            }
         );
 
         assert_eq!(
             types.table_at(0),
-            Some(TableType {
+            TableType {
                 initial: 10,
                 maximum: None,
-                element_type: ValType::FuncRef,
-            })
+                element_type: RefType::FUNCREF,
+            }
         );
 
         assert_eq!(
             types.global_at(0),
-            Some(GlobalType {
+            GlobalType {
                 content_type: ValType::I32,
                 mutable: true
-            })
+            }
         );
 
-        match types.function_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
-                assert_eq!(ty.results(), [ValType::I32]);
-            }
-            _ => unreachable!(),
-        }
+        let id = types.function_at(0);
+        let ty = types[id].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
+        assert_eq!(ty.results(), [ValType::I32]);
 
-        match types.tag_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
-                assert_eq!(ty.results(), []);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types.tag_at(0);
+        let ty = types[ty].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
+        assert_eq!(ty.results(), []);
 
-        assert_eq!(types.element_at(0), Some(ValType::FuncRef));
+        assert_eq!(types.element_at(0), RefType::FUNCREF);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_id_aliasing() -> Result<()> {
+        let bytes = wat::parse_str(
+            r#"
+            (component
+              (type $T (list string))
+              (alias outer 0 $T (type $A1))
+              (alias outer 0 $T (type $A2))
+            )
+        "#,
+        )?;
+
+        let mut validator = Validator::new_with_features(WasmFeatures {
+            component_model: true,
+            ..Default::default()
+        });
+
+        let types = validator.validate_all(&bytes)?;
+
+        let t_id = types.component_type_at(0);
+        let a1_id = types.component_type_at(1);
+        let a2_id = types.component_type_at(2);
+
+        // The ids should all be the same
+        assert!(t_id == a1_id);
+        assert!(t_id == a2_id);
+        assert!(a1_id == a2_id);
+
+        // However, they should all point to the same type
+        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_id_exports() -> Result<()> {
+        let bytes = wat::parse_str(
+            r#"
+            (component
+              (type $T (list string))
+              (export $A1 "A1" (type $T))
+              (export $A2 "A2" (type $T))
+            )
+        "#,
+        )?;
+
+        let mut validator = Validator::new_with_features(WasmFeatures {
+            component_model: true,
+            ..Default::default()
+        });
+
+        let types = validator.validate_all(&bytes)?;
+
+        let t_id = types.component_type_at(0);
+        let a1_id = types.component_type_at(1);
+        let a2_id = types.component_type_at(2);
+
+        // The ids should all be the same
+        assert!(t_id != a1_id);
+        assert!(t_id != a2_id);
+        assert!(a1_id != a2_id);
+
+        // However, they should all point to the same type
+        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
 
         Ok(())
     }

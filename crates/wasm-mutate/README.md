@@ -20,17 +20,16 @@
 
 ## Usage
 
-Add this to your `Cargo.toml`:
+Add `wasm-mutate` to your `Cargo.toml`:
 
-```toml
-[dependencies]
-wasm-mutate = "0.2.0"
+```shell
+$ cargo add wasm-mutate
 ```
 
-You can mutate a WebAssembly binary by using the cli tool:
+You can also mutate a WebAssembly binary by using the cli tool:
 
 ```bash
-./wasm-mutate original.wasm --seed 0 -o out.wasm --preserve-semantics
+wasm-tools mutate original.wasm --seed 0 -o out.wasm --preserve-semantics
 ```
 
 ## Features
@@ -139,7 +138,7 @@ You can mutate a WebAssembly binary by using the cli tool:
 # License
 
 This project is licensed under the Apache 2.0 license with the LLVM exception.
-See [LICENSE](LICENSE) for more details.
+See [LICENSE](../../LICENSE) for more details.
 
 ### Contribution
 

@@ -1,16 +1,10 @@
-#[macro_use]
-extern crate criterion;
-
 use anyhow::Result;
-use criterion::Criterion;
+use criterion::{criterion_group, criterion_main, Criterion};
 use once_cell::unsync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use wasmparser::{
-    BlockType, BrTable, DataKind, ElementKind, Ieee32, Ieee64, MemArg, Parser, Payload, ValType,
-    Validator, VisitOperator, WasmFeatures, V128,
-};
+use wasmparser::{DataKind, ElementKind, Parser, Payload, Validator, VisitOperator, WasmFeatures};
 
 /// A benchmark input.
 pub struct BenchmarkInput {
@@ -136,8 +130,17 @@ fn read_all_wasm(wasm: &[u8]) -> Result<()> {
                             op?;
                         }
                     }
-                    for op in item.items.get_items_reader()? {
-                        op?;
+                    match item.items {
+                        wasmparser::ElementItems::Functions(r) => {
+                            for op in r {
+                                op?;
+                            }
+                        }
+                        wasmparser::ElementItems::Expressions(_, r) => {
+                            for op in r {
+                                op?;
+                            }
+                        }
                     }
                 }
             }
@@ -155,7 +158,7 @@ fn read_all_wasm(wasm: &[u8]) -> Result<()> {
                 let mut reader = body.get_binary_reader();
                 for _ in 0..reader.read_var_u32()? {
                     reader.read_var_u32()?;
-                    reader.read_val_type()?;
+                    reader.read::<wasmparser::ValType>()?;
                 }
                 while !reader.eof() {
                     reader.visit_operator(&mut NopVisit)?;
@@ -229,7 +232,24 @@ fn collect_benchmark_inputs() -> Vec<BenchmarkInput> {
     ret
 }
 
+fn skip_validation(test: &Path) -> bool {
+    let broken = [
+        "gc/gc-rec-sub.wat",
+        "proposals/gc/type-equivalence.wast",
+        "proposals/gc/type-subtyping.wast",
+    ];
+
+    let test_path = test.to_str().unwrap().replace("\\", "/"); // for windows paths
+    if broken.iter().any(|x| test_path.contains(x)) {
+        return true;
+    }
+
+    false
+}
+
 fn define_benchmarks(c: &mut Criterion) {
+    let _ = env_logger::try_init();
+
     fn validator() -> Validator {
         Validator::new_with_features(WasmFeatures {
             reference_types: true,
@@ -244,10 +264,14 @@ fn define_benchmarks(c: &mut Criterion) {
             multi_memory: true,
             memory64: true,
             extended_const: true,
-            deterministic_only: false,
+            floats: true,
             mutable_global: true,
             saturating_float_to_int: true,
             sign_extension: true,
+            function_references: true,
+            memory_control: true,
+            gc: true,
+            component_model_values: true,
         })
     }
 
@@ -274,6 +298,10 @@ fn define_benchmarks(c: &mut Criterion) {
     let validate_inputs = once_cell::unsync::Lazy::new(|| {
         let mut list = Vec::new();
         for input in test_inputs.iter() {
+            if skip_validation(&input.path) {
+                continue;
+            }
+            log::debug!("Validating {}", input.path.display());
             if validator().validate_all(&input.wasm).is_ok() {
                 list.push(&input.wasm);
             }
@@ -320,7 +348,7 @@ struct NopVisit;
 macro_rules! define_visit_operator {
     ($(@$proposal:ident $op:ident $({ $($arg:ident: $argty:ty),* })? => $visit:ident)*) => {
         $(
-            fn $visit(&mut self, _offset: usize $($(,$arg: $argty)*)?) {
+            fn $visit(&mut self $($(,$arg: $argty)*)?) {
                 define_visit_operator!(@visit $op $( $($arg)* )?);
             }
         )*

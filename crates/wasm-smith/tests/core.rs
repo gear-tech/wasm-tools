@@ -127,18 +127,17 @@ fn smoke_test_imports_config() {
 
             for payload in Parser::new(0).parse_all(&wasm_bytes) {
                 let payload = payload.unwrap();
-                if let wasmparser::Payload::TypeSection(mut rdr) = payload {
+                if let wasmparser::Payload::TypeSection(rdr) = payload {
                     // Gather the signature types to later check function types against.
-                    while let Ok(ty) = rdr.read() {
-                        match ty {
-                            wasmparser::Type::Func(ft) => sig_types.push(ft),
-                        }
+                    for ty in rdr.into_iter_err_on_gc_types() {
+                        sig_types.push(ty.unwrap());
                     }
-                } else if let wasmparser::Payload::ImportSection(mut rdr) = payload {
+                } else if let wasmparser::Payload::ImportSection(rdr) = payload {
                     // Read out imports, checking that they all are within the list of expected
                     // imports (i.e. we don't generate arbitrary ones), and that we handle the
                     // logic correctly (i.e. signature types are as expected)
-                    while let Ok(import) = rdr.read() {
+                    for import in rdr {
+                        let import = import.unwrap();
                         use AvailableImportKind as I;
                         let entry = imports_seen.get_mut(&(import.module, import.name));
                         match (entry, &import.ty) {
@@ -150,7 +149,7 @@ fn smoke_test_imports_config() {
                                 *seen = true
                             }
                             (Some((seen, I::Table(t))), TypeRef::Table(tt))
-                                if *t == tt.element_type =>
+                                if *t == ValType::Ref(tt.element_type) =>
                             {
                                 *seen = true
                             }
@@ -203,13 +202,13 @@ fn smoke_test_no_trapping_mode() {
     let mut buf = vec![0; 2048];
     for _ in 0..1024 {
         rng.fill_bytes(&mut buf);
-        let u = Unstructured::new(&buf);
-        if let Ok(mut module) = Module::arbitrary_take_rest(u) {
-            if module.no_traps().is_ok() {
-                let wasm_bytes = module.to_bytes();
-                let mut validator = Validator::new_with_features(wasm_features());
-                validate(&mut validator, &wasm_bytes);
-            }
+        let mut u = Unstructured::new(&buf);
+        let mut cfg = SwarmConfig::arbitrary(&mut u).unwrap();
+        cfg.disallow_traps = true;
+        if let Ok(module) = Module::new(cfg, &mut u) {
+            let wasm_bytes = module.to_bytes();
+            let mut validator = Validator::new_with_features(wasm_features());
+            validate(&mut validator, &wasm_bytes);
         }
     }
 }
@@ -220,6 +219,7 @@ fn wasm_features() -> WasmFeatures {
         relaxed_simd: true,
         memory64: true,
         exceptions: true,
+        tail_call: true,
         ..WasmFeatures::default()
     }
 }
@@ -251,7 +251,7 @@ fn import_config(
             ("env", "pipo", Func(&[I32], &[I32])),
             ("env", "popo", Func(&[], &[I32, I32])),
             ("env", "mem", Memory),
-            ("env", "tbl", Table(FuncRef)),
+            ("env", "tbl", Table(ValType::FUNCREF)),
             ("vars", "g", Global(I64)),
             ("tags", "tag1", Tag(&[I32])),
         ]
@@ -292,12 +292,16 @@ fn parser_features_from_config(config: &impl Config) -> WasmFeatures {
         multi_memory: config.max_memories() > 1,
         exceptions: config.exceptions_enabled(),
         memory64: config.memory64_enabled(),
+        tail_call: config.tail_call_enabled(),
 
         threads: false,
-        tail_call: false,
-        deterministic_only: false,
+        floats: true,
         extended_const: false,
         component_model: false,
+        function_references: false,
+        memory_control: false,
+        gc: false,
+        component_model_values: false,
     }
 }
 

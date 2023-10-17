@@ -13,8 +13,7 @@
   (type $A12 char)
   (type $A13 string)
 
-  (type $A14a (record))
-  (type $A14b (record (field "x" (tuple))))
+  (type $A14b (record (field "x" (tuple char))))
   (type $A14c (record (field "x" $A1)))
 
   (type $A15a (variant (case "x")))
@@ -22,22 +21,17 @@
   (type $A15c (variant (case $x "x") (case $y "y" string (refines $x)) (case "z" string (refines $y))))
   (type $A15d (variant (case "x") (case "y" string (refines 0)) (case "z" string (refines 1))))
 
-  (type $A16a (list (tuple)))
+  (type $A16a (list (tuple u8)))
   (type $A16b (list $A3))
 
-  (type $A17a (tuple))
+  (type $A17a (tuple u8))
   (type $A17b (tuple $A4))
 
-  (type $A18a (flags))
   (type $A18b (flags "x"))
 
-  (type $A19a (enum))
   (type $A19b (enum "x"))
 
-  (type $A20a (union))
-  (type $A20b (union $A5))
-
-  (type $A21a (option (tuple)))
+  (type $A21a (option (tuple u32)))
   (type $A21b (option $A6))
 
   (type $A22a (result))
@@ -57,7 +51,7 @@
   (component
     (type $t (variant (case "x" (refines $y)) (case $y "y" string)))
   )
-  "failed to find variant case named `$y`"
+  "unknown variant case"
 )
 
 (assert_invalid
@@ -65,8 +59,9 @@
     (type $t string)
     (type $v (variant (case "x" $t (refines $z))))
   )
-  "failed to find variant case named `$z`"
+  "unknown variant case"
 )
+
 
 (assert_invalid
   (component
@@ -95,7 +90,7 @@
 (assert_invalid
   (component
     (type $t (func))
-    (type (func (param $t)))
+    (type (func (param "t" $t)))
   )
   "type index 0 is not a defined type")
 
@@ -126,9 +121,6 @@
   (component (type (variant (case "x" 0))))
   "index out of bounds")
 (assert_invalid
-  (component (type (union 0)))
-  "index out of bounds")
-(assert_invalid
   (component (type (result 0 (error 1))))
   "index out of bounds")
 (assert_invalid
@@ -136,17 +128,17 @@
   "index out of bounds")
 
 (assert_invalid
-  (component (type (record (field "x" string) (field "x" u8))))
-  "duplicate field named `x` in record type")
+  (component (type (record (field "a-B-c-D" string) (field "A-b-C-d" u8))))
+  "record field name `A-b-C-d` conflicts with previous field name `a-B-c-D`")
 (assert_invalid
   (component (type (variant (case "x" s64) (case "x" s64))))
-  "duplicate case named `x` in variant type")
+  "variant case name `x` conflicts with previous case name `x`")
 (assert_invalid
-  (component (type (flags "x" "y" "x")))
-  "duplicate flag named `x`")
+  (component (type (flags "x" "y" "X")))
+  "flag name `X` conflicts with previous flag name `x`")
 (assert_invalid
-  (component (type (enum "x" "y" "x")))
-  "duplicate enum tag named `x`")
+  (component (type (enum "x" "y" "X")))
+  "enum tag name `X` conflicts with previous tag name `x`")
 
 (assert_invalid
   (component (type (record (field "" s32))))
