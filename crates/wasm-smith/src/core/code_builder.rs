@@ -4625,6 +4625,11 @@ fn memory_offset(u: &mut Unstructured, module: &Module, memory_index: u32) -> Re
 
     let choice = u.int_in_range(0..=a + b + c - 1)?;
     if choice < a {
+        let min = module
+            .config
+            .reserved_memory_size()
+            .map(|reserved| min.saturating_sub(reserved).saturating_sub(16))
+            .unwrap_or(min);
         u.int_in_range(0..=min)
     } else if choice < a + b {
         u.int_in_range(min..=max)
