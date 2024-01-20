@@ -2,12 +2,11 @@ use super::{
     Elements, FuncType, GlobalInitExpr, Instruction, InstructionKind::*, InstructionKinds, Module,
     ValType,
 };
-use crate::unique_string;
 use arbitrary::{Result, Unstructured};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::rc::Rc;
-use wasm_encoder::{BlockType, ConstExpr, ExportKind, GlobalType, MemArg, RefType};
+use wasm_encoder::{BlockType, ConstExpr, GlobalType, MemArg, RefType};
 mod no_traps;
 
 macro_rules! instructions {
