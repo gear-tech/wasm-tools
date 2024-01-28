@@ -644,7 +644,7 @@ impl<'a> Arbitrary<'a> for SwarmConfig {
             max_modules: 0,
             max_components: 0,
             max_values: 0,
-            memory_offset_choices: (75, 25, 0),
+            memory_offset_choices: (75, 24, 1),
             allow_start_export: true,
             relaxed_simd_enabled: false,
             exceptions_enabled: false,

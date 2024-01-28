@@ -4625,6 +4625,8 @@ fn memory_offset(u: &mut Unstructured, module: &Module, memory_index: u32) -> Re
 
     let choice = u.int_in_range(0..=a + b + c - 1)?;
     if choice < a {
+        // Here we guarantee that writing to reserved memory will never happen.
+        // 16 is the number of bytes of the largest load type (V128).
         let min = module
             .config
             .reserved_memory_size()
