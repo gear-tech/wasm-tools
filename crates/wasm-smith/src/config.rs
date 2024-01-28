@@ -323,6 +323,11 @@ pub trait Config: 'static + std::fmt::Debug {
         false
     }
 
+    /// The size of reserved memory on the last memory page. Defaults to None.
+    fn reserved_memory_size(&self) -> Option<u64> {
+        None
+    }
+
     /// Determines whether the tail calls proposal is enabled for generating
     /// instructions.
     ///
@@ -560,6 +565,7 @@ pub struct SwarmConfig {
     pub min_uleb_size: u8,
     pub multi_value_enabled: bool,
     pub reference_types_enabled: bool,
+    pub reserved_memory_size: Option<u64>,
     pub tail_call_enabled: bool,
     pub relaxed_simd_enabled: bool,
     pub saturating_float_to_int_enabled: bool,
@@ -595,6 +601,7 @@ impl<'a> Arbitrary<'a> for SwarmConfig {
             max_tables,
             max_memory_pages: u.arbitrary()?,
             min_uleb_size: u.int_in_range(0..=5)?,
+            reserved_memory_size: None,
             bulk_memory_enabled: reference_types_enabled || u.arbitrary()?,
             reference_types_enabled,
             simd_enabled: u.arbitrary()?,
@@ -782,6 +789,10 @@ impl Config for SwarmConfig {
 
     fn reference_types_enabled(&self) -> bool {
         self.reference_types_enabled
+    }
+
+    fn reserved_memory_size(&self) -> Option<u64> {
+        self.reserved_memory_size
     }
 
     fn tail_call_enabled(&self) -> bool {
