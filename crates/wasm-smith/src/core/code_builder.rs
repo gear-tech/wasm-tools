@@ -3319,8 +3319,9 @@ fn memory_size(
 
 #[inline]
 fn memory_grow_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
-    (builder.allocs.memory32.len() > 0 && builder.type_on_stack(module, ValType::I32))
-        || (builder.allocs.memory64.len() > 0 && builder.type_on_stack(module, ValType::I64))
+    module.config.memory_grow_enabled
+        && ((builder.allocs.memory32.len() > 0 && builder.type_on_stack(module, ValType::I32))
+            || (builder.allocs.memory64.len() > 0 && builder.type_on_stack(module, ValType::I64)))
 }
 
 fn memory_grow(
@@ -3344,7 +3345,6 @@ fn memory_grow(
 #[inline]
 fn memory_init_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.bulk_memory_enabled
-        && module.config.memory_grow_enabled
         && have_data(module, builder)
         && !module.config.disallow_traps // Non-trapping memory init not yet implemented
         && (builder.allocs.memory32.len() > 0
