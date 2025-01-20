@@ -3319,8 +3319,9 @@ fn memory_size(
 
 #[inline]
 fn memory_grow_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
-    (builder.allocs.memory32.len() > 0 && builder.type_on_stack(module, ValType::I32))
-        || (builder.allocs.memory64.len() > 0 && builder.type_on_stack(module, ValType::I64))
+    module.config.memory_grow_enabled
+        && ((builder.allocs.memory32.len() > 0 && builder.type_on_stack(module, ValType::I32))
+            || (builder.allocs.memory64.len() > 0 && builder.type_on_stack(module, ValType::I64)))
 }
 
 fn memory_grow(
