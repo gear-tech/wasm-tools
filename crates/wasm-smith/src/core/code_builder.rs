@@ -3344,6 +3344,7 @@ fn memory_grow(
 #[inline]
 fn memory_init_valid(module: &Module, builder: &mut CodeBuilder) -> bool {
     module.config.bulk_memory_enabled
+        && module.config.memory_grow_enabled
         && have_data(module, builder)
         && !module.config.disallow_traps // Non-trapping memory init not yet implemented
         && (builder.allocs.memory32.len() > 0
