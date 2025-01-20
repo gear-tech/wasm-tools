@@ -553,6 +553,12 @@ define_config! {
         /// Defaults to `None`.
         pub reserved_memory_size: Option<u64> = None,
 
+        /// Determines whether memory grow instruction is enabled
+        /// in the generating module.
+        ///
+        /// Defaults to `true`.
+        pub memory_grow_enabled: bool = true,
+
         /// Determines whether the Relaxed SIMD proposal is enabled for
         /// generating instructions.
         ///
@@ -747,6 +753,7 @@ impl<'a> Arbitrary<'a> for Config {
             // They either make weird inputs or are for features not widely
             // implemented yet so they're turned off by default.
             reserved_memory_size: None,
+            memory_grow_enabled: false,
             min_types: 0,
             min_imports: 0,
             min_tags: 0,
