@@ -548,6 +548,11 @@ define_config! {
         /// Defaults to `true`.
         pub reference_types_enabled: bool = true,
 
+        /// The size of reserved memory on the last memory page.
+        ///
+        /// Defaults to `None`.
+        pub reserved_memory_size: Option<u64> = None,
+
         /// Determines whether the Relaxed SIMD proposal is enabled for
         /// generating instructions.
         ///
@@ -741,6 +746,7 @@ impl<'a> Arbitrary<'a> for Config {
             // These fields, unlike the ones above, are less useful to set.
             // They either make weird inputs or are for features not widely
             // implemented yet so they're turned off by default.
+            reserved_memory_size: None,
             min_types: 0,
             min_imports: 0,
             min_tags: 0,
